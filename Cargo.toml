@@ -4,3 +4,18 @@ version = "0.1.0"
 authors = ["szagi3891 <szeligagrzegorz@gmail.com>", "sfisol <sfisol@gmail.com>"]
 
 [dependencies]
+#mio = "0.5.0"
+httparse = "1.1.0"
+net2 = "0.2"
+libc = "0.1"
+
+
+[dependencies.mio]
+git = "https://github.com/carllerche/mio"
+
+[dependencies.task_async]
+git = "https://github.com/szagi3891/task_async-rs"
+
+[dependencies.channels_async]
+git = "https://github.com/szagi3891/channels_async-rs"
+#path = "../channels_async-rs"
