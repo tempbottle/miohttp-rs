@@ -28,7 +28,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "channels_async"
 version = "0.1.0"
-source = "git+https://github.com/szagi3891/channels_async-rs#975fefa68426e1856e16cd37f272645b9cc68ae2"
+source = "git+https://github.com/szagi3891/channels_async-rs#4d27354116070b10648e35d1c7a1b9ec9364ee22"
 
 [[package]]
 name = "httparse"
@@ -115,7 +115,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "task_async"
 version = "0.1.0"
-source = "git+https://github.com/szagi3891/task_async-rs#77df84983e9d2e6bb2f167864b94dd28249a5dc1"
+source = "git+https://github.com/szagi3891/task_async-rs#b5933b8d69554476bd2b227fa0edc05e6891a65e"
 dependencies = [
  "channels_async 0.1.0 (git+https://github.com/szagi3891/channels_async-rs)",
 ]
