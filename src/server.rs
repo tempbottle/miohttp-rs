@@ -17,15 +17,19 @@ use std::time::Duration;
 
 
 
+pub type FnConvert<Out> = Box<Fn((Request, Respchan)) -> Out + Send + Sync + 'static>;
+
+
 // Define a handler to process the events
-pub struct MyHandler {
+pub struct MyHandler<Out> where Out : Send + Sync + 'static {
     token           : Token,
     server          : Option<TcpListener>,                  //Some - serwer nasłuchuje, None - jest w trybie wyłączania
     hash            : HashMap<Token, (Connection, Event, Option<Timeout>)>,
     tokens          : TokenGen,
-    channel         : Sender<(Request, Respchan)>,                //TODO - trzeba użyć typu generycznego i pozbyć się tej zależności ???
+    channel         : Sender<Out>,                  //TODO - trzeba użyć typu generycznego i pozbyć się tej zależności
     timeout_reading : u64,
-    timeout_writing : u64
+    timeout_writing : u64,
+    convert_request : FnConvert<Out>,
 }
 
 
@@ -46,7 +50,7 @@ pub enum MioMessage {
 }
 
 
-pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, tx: Sender<(Request, Respchan)>) -> (MioDown, callback0::CallbackBox) {
+pub fn new_server<Out>(addres: String, timeout_reading: u64, timeout_writing:u64, tx: Sender<Out>, convert : FnConvert<Out>) -> (MioDown, callback0::CallbackBox) where Out : Send + Sync + 'static {
 
     let mut event_loop = EventLoop::new().unwrap();
 
@@ -62,14 +66,15 @@ pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, tx:
 
         event_loop.register(&server, token, EventSet::readable(), PollOpt::edge()).unwrap();
 
-        let mut inst = MyHandler {
+        let mut inst = MyHandler::<Out> {
             token           : token,
             server          : Some(server),
             hash            : HashMap::new(),
             tokens          : tokens,
             channel         : tx,
             timeout_reading : timeout_reading,
-            timeout_writing : timeout_writing
+            timeout_writing : timeout_writing,
+            convert_request : convert,
         };
 
         event_loop.run(&mut inst).unwrap();
@@ -79,12 +84,12 @@ pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, tx:
 }
 
 
-impl Handler for MyHandler {
+impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
 
     type Timeout = Token;
     type Message = MioMessage;
 
-    fn ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, events: EventSet) {
+    fn ready(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: Token, events: EventSet) {
 
         task_async::log_debug(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self.token));
 
@@ -131,16 +136,16 @@ impl Handler for MyHandler {
 }
 
 
-impl MyHandler {
+impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     
-    fn test_close_mio(&self, event_loop: &mut EventLoop<MyHandler>) {
+    fn test_close_mio(&self, event_loop: &mut EventLoop<MyHandler<Out>>) {
         
         if self.server.is_none() && self.hash.len() == 0 {
             event_loop.shutdown();
         }
     }
     
-    fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, response: response::Response) {
+    fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: Token, response: response::Response) {
 
         match self.get_connection(&token) {
             
@@ -176,7 +181,7 @@ impl MyHandler {
     }
     
     
-    fn new_connection(&mut self, event_loop: &mut EventLoop<MyHandler>) {
+    fn new_connection(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>) {
         
         let new_connections = match &(self.server) {
 
@@ -228,7 +233,7 @@ impl MyHandler {
     }
     
     
-    fn socket_ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, events: EventSet) {
+    fn socket_ready(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: &Token, events: EventSet) {
         
         match self.get_connection(&token) {
 
@@ -251,7 +256,8 @@ impl MyHandler {
                         
                         let respchan = Respchan::new(token.clone(), event_loop.channel());
                         
-                        self.channel.send((request, respchan)).unwrap();
+                        let pack_request = (self.convert_request)((request, respchan));
+                        self.channel.send(pack_request).unwrap();
                     }
 
                     None => {}
@@ -268,7 +274,7 @@ impl MyHandler {
     }
 
 
-    fn set_event(&mut self, connection: &Connection, token: &Token, old_event: &Event, new_event: &Event, event_loop: &mut EventLoop<MyHandler>) -> Result<String, io::Error> {
+    fn set_event(&mut self, connection: &Connection, token: &Token, old_event: &Event, new_event: &Event, event_loop: &mut EventLoop<MyHandler<Out>>) -> Result<String, io::Error> {
         
         let pool_opt = PollOpt::edge() | PollOpt::oneshot();
         
@@ -302,7 +308,7 @@ impl MyHandler {
     }
 
     
-    fn set_timer(&mut self, token: &Token, timeout: Option<Timeout>, timer_mode: TimerMode, event_loop: &mut EventLoop<MyHandler>) -> (Option<Timeout>, String) {
+    fn set_timer(&mut self, token: &Token, timeout: Option<Timeout>, timer_mode: TimerMode, event_loop: &mut EventLoop<MyHandler<Out>>) -> (Option<Timeout>, String) {
         
         match timeout {
             
@@ -352,7 +358,7 @@ impl MyHandler {
         }
     }
     
-    fn insert_connection(&mut self, token: &Token, connection: Connection, old_event: Event, timeout: Option<Timeout>, event_loop: &mut EventLoop<MyHandler>) {
+    fn insert_connection(&mut self, token: &Token, connection: Connection, old_event: Event, timeout: Option<Timeout>, event_loop: &mut EventLoop<MyHandler<Out>>) {
 
         let new_event = connection.get_event();
         
