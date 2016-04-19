@@ -103,7 +103,7 @@ impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
     }
 
     fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
-
+        
         match msg {
             
             MioMessage::Response(token, response) => {
@@ -117,6 +117,9 @@ impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
                     Some(server) => {
 
                         event_loop.deregister(&server).unwrap();
+                        
+                        self.test_close_mio(event_loop);
+                        
                     },
                     None => {
                         
