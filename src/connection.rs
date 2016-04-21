@@ -117,7 +117,7 @@ impl Connection {
         }
     }
     
-    pub fn ready(self, events: EventSet, token: &Token) -> (Connection, Option<Request>) {
+    pub fn ready(self, events: EventSet, token: &Token, server_down: bool) -> (Connection, Option<Request>) {
         
         if events.is_error() {
             
@@ -131,12 +131,12 @@ impl Connection {
             return (self.replace_mode(ConnectionMode::Close), None);
         }
         
-        self.transform(events, token)
+        self.transform(events, token, server_down)
     }
 
 
 
-    fn transform(self, events: EventSet, token: &Token) -> (Connection, Option<Request>) {
+    fn transform(self, events: EventSet, token: &Token, server_down: bool) -> (Connection, Option<Request>) {
 
         match self.mode {
 
@@ -152,7 +152,7 @@ impl Connection {
             
             ConnectionMode::SendingResponse(keep_alive, str, done) => {
 
-                (transform_from_sending_to_user(self.stream, token, keep_alive, events, str, done), None)
+                (transform_from_sending_to_user(self.stream, token, keep_alive, events, str, done, server_down), None)
             },
 
             ConnectionMode::Close => {
@@ -272,7 +272,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 }
 
 
-fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize) -> Connection {
+fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize, server_down: bool) -> Connection {
 
     if events.is_writable() {
 
@@ -287,8 +287,9 @@ fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_ali
                                                     //send all data to browser
                     if done == str.len() {
 
-                                                    //eep connection
-                        if keep_alive == true {
+                                                    //keep connection
+                        
+                        if server_down == false && keep_alive == true {
 
                             task_async::log_debug(format!("miohttp {} -> keep alive", token.as_usize()));
                             

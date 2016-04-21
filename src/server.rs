@@ -242,7 +242,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
 
             Some((connection, old_event, timeout)) => {
                 
-                let (new_connection, request_opt) = connection.ready(events, token);
+                let (new_connection, request_opt) = connection.ready(events, token, self.server.is_none());
                 
                 if new_connection.in_state_close() {
                     
