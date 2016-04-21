@@ -4,7 +4,8 @@ use code::Code;
 
 #[derive(Debug)]
 pub struct Response {
-    message : Vec<u8>,
+    close_connection : bool,
+    message          : Vec<u8>,
 }
 
 
@@ -18,10 +19,17 @@ impl Response {
         self.message.append(&mut (line + "\r\n").into_bytes());
     }
     
+    pub fn close_connection(&self) -> bool {
+        self.close_connection
+    }
+    
     fn create_headers(code: Code, typ: Type, length: usize) -> Response {
         
+        let close_connection = code == Code::Code500 || code == Code::Code400;
+        
         let mut response = Response {
-            message : Vec::new()
+            close_connection : close_connection,
+            message          : Vec::new(),
         };
         
         response.append_string("HTTP/1.1 ".to_owned() + code.to_str());

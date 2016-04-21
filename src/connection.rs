@@ -73,7 +73,9 @@ impl Connection {
 
             ConnectionMode::WaitingForServerResponse(keep_alive) => {
                 
-                self.replace_mode(ConnectionMode::SendingResponse(keep_alive, response.as_bytes(), 0))
+                let close_connection = response.close_connection();
+                
+                self.replace_mode(ConnectionMode::SendingResponse(keep_alive && close_connection == false, response.as_bytes(), 0))
             }
 
             _ => {

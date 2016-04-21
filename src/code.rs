@@ -1,3 +1,4 @@
+#[derive(PartialEq)]
 pub enum Code {
     Code200,
     Code400,
