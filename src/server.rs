@@ -132,7 +132,7 @@ impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
 
     fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Self::Timeout) {
         
-        self.timeout_trigger(&token);
+        self.timeout_trigger(&token, event_loop);
         
         self.test_close_mio(event_loop);
     }
@@ -149,38 +149,22 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
     
     fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: Token, response: response::Response) {
+        
+        self.get_connection(event_loop, &token, Box::new(move|connection_prev : Connection| -> Option<Connection> {
 
-        match self.get_connection(&token) {
-            
-            Some((connection, old_event, timeout)) => {
-
-                let new_connection = connection.send_data_to_user(token.clone(), response);
-
-                self.insert_connection(&token, new_connection, old_event, timeout, event_loop);
-            }
-
-            None => {
-                
-                task_async::log_info(format!("miohttp {} -> send_data_to_user: no socket", token.as_usize()));
-            }
-        }
+            Some(connection_prev.send_data_to_user(token.clone(), response))
+        }));
     }
     
     
-    fn timeout_trigger(&mut self, token: &Token) {
+    fn timeout_trigger(&mut self, token: &Token, event_loop: &mut EventLoop<MyHandler<Out>>) {
         
-        match self.get_connection(&token) {
-
-            Some((_, _, _)) => {
-                
-                task_async::log_debug(format!("miohttp {} -> timeout_trigger ok", token.as_usize()));
-            }
-
-            None => {
-                
-                task_async::log_error(format!("miohttp {} -> timeout_trigger error", token.as_usize()));
-            }
-        }
+        let token = token.clone();
+        
+        self.get_connection(event_loop, &token, Box::new(move|connection_prev : Connection| -> Option<Connection> {
+            
+            task_async::log_debug(format!("miohttp {} -> timeout_trigger ok", token.as_usize()));
+        }));
     }
     
     
@@ -238,48 +222,39 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     
     fn socket_ready(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: &Token, events: EventSet) {
         
-        match self.get_connection(&token) {
+        let token       = token.clone();
+        let server_down = self.server.is_none();
+        
+        self.get_connection(event_loop, &token, Box::new(move|connection_prev : Connection| -> Option<Connection> {
 
-            Some((connection_prev, old_event, timeout)) => {
-                
-                let (connection_opt, request_opt) = connection_prev.ready(events, token, self.server.is_none());
-                
-                match connection_opt {
-                    
-                    Some(connection) => {
-                        
-                        match request_opt {
-                            
-                            Some(request) => {
-                                
-                                let respchan = Respchan::new(token.clone(), event_loop.channel());
-                                
-                                let pack_request = (self.convert_request)((request, respchan));
-                                self.channel.send(pack_request).unwrap();
-                            }
+            let (connection_opt, request_opt) = connection_prev.ready(events, &token, server_down);
 
-                            None => {}
+            match connection_opt {
+
+                Some(connection) => {
+
+                    match request_opt {
+
+                        Some(request) => {
+
+                            let respchan = Respchan::new(token.clone(), event_loop.channel());
+
+                            let pack_request = (self.convert_request)((request, respchan));
+                            self.channel.send(pack_request).unwrap();
                         }
 
-                        self.insert_connection(&token, connection, old_event, timeout, event_loop);
-                    },
-                    
-                    None => {
-                        
-                        if let Some(ref timeout_value) = timeout {
-                            let _ = event_loop.clear_timeout(timeout_value);
-                        }
-                        
-                        //event_loop.deregister(stream);
+                        None => {}
                     }
+                    
+                    Some(connection)
+                },
+
+                None => {
+                    
+                    None
                 }
             }
-
-            None => {
-                
-                task_async::log_info(format!("miohttp {} -> socket ready: no socket by token", token.as_usize()));
-            }
-        };
+        }));
     }
 
 
@@ -394,13 +369,46 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         task_async::log_debug(format!("count hasmapy after insert {}", self.hash.len()));
     }
     
-    fn get_connection(&mut self, token: &Token) -> Option<(Connection, Event, Option<Timeout>)> {
-
+    fn get_connection(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: &Token, process: Box<Fn(Connection) -> Option<Connection>>) {
+        
+        // -> Option<(Connection, Event, Option<Timeout>)>
+        
         let res = self.hash.remove(&token);
         
         task_async::log_debug(format!("hashmap after decrement {}", self.hash.len()));
         
-        res
+        match res {
+            
+            Some((connection_prev, old_event, timeout)) => {
+                
+                match process(connection_prev) {
+                    
+                    Some(connection_new) => {
+                        
+                        self.insert_connection(&token, connection_new, old_event, timeout, event_loop);
+                    },
+                    
+                    None => {
+                        
+                        if let Some(ref timeout_value) = timeout {
+                            let _ = event_loop.clear_timeout(timeout_value);
+                        }
+                        
+                        //TODO - trzeba zrobić odzyskiwanie połączenia ...
+                        //czyli callback może zwrócić albo Connection, albo Strem
+                        //gdy zwróci stream, to trzeba je wyrejestrować
+                        
+                        //event_loop.deregister(stream);
+                    }
+                }
+                
+            },
+            
+            None => {
+                
+                task_async::log_info(format!("miohttp {} -> no socket by token", token.as_usize()));
+            }
+        }
     }
 
 
