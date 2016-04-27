@@ -240,33 +240,39 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         
         match self.get_connection(&token) {
 
-            Some((connection, old_event, timeout)) => {
+            Some((connection_prev, old_event, timeout)) => {
                 
-                let (new_connection, request_opt) = connection.ready(events, token, self.server.is_none());
+                let (connection_opt, request_opt) = connection_prev.ready(events, token, self.server.is_none());
                 
-                if new_connection.in_state_close() {
+                match connection_opt {
                     
-                    if let Some(ref timeout_value) = timeout {
-                        let _ = event_loop.clear_timeout(timeout_value);
-                    }
-                    
-                    return;
-                }
-                
-                match request_opt {
-                    
-                    Some(request) => {
+                    Some(connection) => {
                         
-                        let respchan = Respchan::new(token.clone(), event_loop.channel());
+                        match request_opt {
+                            
+                            Some(request) => {
+                                
+                                let respchan = Respchan::new(token.clone(), event_loop.channel());
+                                
+                                let pack_request = (self.convert_request)((request, respchan));
+                                self.channel.send(pack_request).unwrap();
+                            }
+
+                            None => {}
+                        }
+
+                        self.insert_connection(&token, connection, old_event, timeout, event_loop);
+                    },
+                    
+                    None => {
                         
-                        let pack_request = (self.convert_request)((request, respchan));
-                        self.channel.send(pack_request).unwrap();
+                        if let Some(ref timeout_value) = timeout {
+                            let _ = event_loop.clear_timeout(timeout_value);
+                        }
+                        
+                        //event_loop.deregister(stream);
                     }
-
-                    None => {}
                 }
-
-                self.insert_connection(&token, new_connection, old_event, timeout, event_loop);
             }
 
             None => {
