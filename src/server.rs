@@ -152,7 +152,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     
     fn send_data_to_user(&mut self, event_loop: &mut EvLoop<Out>, token: Token, response: response::Response) {
         
-        self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
 
             (Ok(connection_prev.send_data_to_user(token.clone(), response)), None)
         });
@@ -163,7 +163,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         
         let token = token.clone();
         
-        self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
             
             task_async::log_debug(format!("miohttp {} -> timeout_trigger ok", token.as_usize()));
             (Err(connection_prev.get_stream()), None)
@@ -228,7 +228,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         let token       = token.clone();
         let server_down = self.server.is_none();
         
-        let request_opt = self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
+        let request_opt = self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
 
             let (connection_opt, request_opt) = connection_prev.ready(events, &token, server_down);
 
@@ -377,7 +377,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         task_async::log_debug(format!("count hasmapy after insert {}", self.hash.len()));
     }
     
-    fn get_connection<F>(&mut self, event_loop: &mut EvLoop<Out>, token: &Token, process: F) -> Option<Request>
+    fn transform_connection<F>(&mut self, event_loop: &mut EvLoop<Out>, token: &Token, process: F) -> Option<Request>
         where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<Request>) {
         
         let res = self.hash.remove(&token);
@@ -403,14 +403,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
                             let _ = event_loop.clear_timeout(timeout_value);
                         }
                         
-                        
-                        //TODO - trzeba zrobić odzyskiwanie połączenia ...
-                        //czyli callback może zwrócić albo Connection, albo Strem
-                        //gdy zwróci stream, to trzeba je wyrejestrować
-                        
-                        //event_loop.deregister(stream);
-                        
-                        //http://rustdoc.s3-website-us-east-1.amazonaws.com/mio/master/mio/struct.EventLoop.html#method.deregister
+                        event_loop.deregister(&stream);
                     }
                 };
                 
