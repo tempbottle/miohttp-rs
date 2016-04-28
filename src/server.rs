@@ -19,6 +19,8 @@ use std::time::Duration;
 
 pub type FnConvert<Out> = Box<Fn((Request, Respchan)) -> Out + Send + Sync + 'static>;
 
+pub type EvLoop<Out> = EventLoop<MyHandler<Out>>;
+
 
 // Define a handler to process the events
 pub struct MyHandler<Out> where Out : Send + Sync + 'static {
@@ -89,7 +91,7 @@ impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
     type Timeout = Token;
     type Message = MioMessage;
 
-    fn ready(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: Token, events: EventSet) {
+    fn ready(&mut self, event_loop: &mut EvLoop<Out>, token: Token, events: EventSet) {
 
         task_async::log_debug(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self.token));
 
@@ -132,7 +134,7 @@ impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
 
     fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Self::Timeout) {
         
-        self.timeout_trigger(&token);
+        self.timeout_trigger(&token, event_loop);
         
         self.test_close_mio(event_loop);
     }
@@ -141,50 +143,35 @@ impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
 
 impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     
-    fn test_close_mio(&self, event_loop: &mut EventLoop<MyHandler<Out>>) {
+    fn test_close_mio(&self, event_loop: &mut EvLoop<Out>) {
         
         if self.server.is_none() && self.hash.len() == 0 {
             event_loop.shutdown();
         }
     }
     
-    fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: Token, response: response::Response) {
-
-        match self.get_connection(&token) {
-            
-            Some((connection, old_event, timeout)) => {
-
-                let new_connection = connection.send_data_to_user(token.clone(), response);
-
-                self.insert_connection(&token, new_connection, old_event, timeout, event_loop);
-            }
-
-            None => {
-                
-                task_async::log_info(format!("miohttp {} -> send_data_to_user: no socket", token.as_usize()));
-            }
-        }
-    }
-    
-    
-    fn timeout_trigger(&mut self, token: &Token) {
+    fn send_data_to_user(&mut self, event_loop: &mut EvLoop<Out>, token: Token, response: response::Response) {
         
-        match self.get_connection(&token) {
+        self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Option<Connection>, Option<Request>) {
 
-            Some((_, _, _)) => {
-                
-                task_async::log_debug(format!("miohttp {} -> timeout_trigger ok", token.as_usize()));
-            }
-
-            None => {
-                
-                task_async::log_error(format!("miohttp {} -> timeout_trigger error", token.as_usize()));
-            }
-        }
+            (Some(connection_prev.send_data_to_user(token.clone(), response)), None)
+        });
     }
     
     
-    fn new_connection(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>) {
+    fn timeout_trigger(&mut self, token: &Token, event_loop: &mut EvLoop<Out>) {
+        
+        let token = token.clone();
+        
+        self.get_connection(event_loop, &token, move|_ : Connection| -> (Option<Connection>, Option<Request>) {
+            
+            task_async::log_debug(format!("miohttp {} -> timeout_trigger ok", token.as_usize()));
+            (None, None)
+        });
+    }
+    
+    
+    fn new_connection(&mut self, event_loop: &mut EvLoop<Out>) {
         
         let new_connections = match &(self.server) {
 
@@ -236,54 +223,50 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
     
     
-    fn socket_ready(&mut self, event_loop: &mut EventLoop<MyHandler<Out>>, token: &Token, events: EventSet) {
+    fn socket_ready(&mut self, event_loop: &mut EvLoop<Out>, token: &Token, events: EventSet) {
         
-        match self.get_connection(&token) {
+        let token       = token.clone();
+        let server_down = self.server.is_none();
+        
+        let request_opt = self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Option<Connection>, Option<Request>) {
 
-            Some((connection_prev, old_event, timeout)) => {
-                
-                let (connection_opt, request_opt) = connection_prev.ready(events, token, self.server.is_none());
-                
-                match connection_opt {
-                    
-                    Some(connection) => {
-                        
-                        match request_opt {
+            let (connection_opt, request_opt) = connection_prev.ready(events, &token, server_down);
+
+            match connection_opt {
+
+                Some(connection) => {
+
+                    match request_opt {
+
+                        Some(request) => {
                             
-                            Some(request) => {
-                                
-                                let respchan = Respchan::new(token.clone(), event_loop.channel());
-                                
-                                let pack_request = (self.convert_request)((request, respchan));
-                                self.channel.send(pack_request).unwrap();
-                            }
-
-                            None => {}
+                            (Some(connection), Some(request))
                         }
 
-                        self.insert_connection(&token, connection, old_event, timeout, event_loop);
-                    },
-                    
-                    None => {
-                        
-                        if let Some(ref timeout_value) = timeout {
-                            let _ = event_loop.clear_timeout(timeout_value);
+                        None => {
+                            (Some(connection), None)
                         }
-                        
-                        //event_loop.deregister(stream);
                     }
+                },
+
+                None => {
+                    
+                    (None, None)
                 }
             }
+        });
+        
+        if let Some(request) = request_opt {
+            
+            let respchan = Respchan::new(token.clone(), event_loop.channel());
 
-            None => {
-                
-                task_async::log_info(format!("miohttp {} -> socket ready: no socket by token", token.as_usize()));
-            }
-        };
+            let pack_request = (self.convert_request)((request, respchan));
+            self.channel.send(pack_request).unwrap();    
+        }
     }
 
 
-    fn set_event(&mut self, connection: &Connection, token: &Token, old_event: &Event, new_event: &Event, event_loop: &mut EventLoop<MyHandler<Out>>) -> Result<String, io::Error> {
+    fn set_event(&mut self, connection: &Connection, token: &Token, old_event: &Event, new_event: &Event, event_loop: &mut EvLoop<Out>) -> Result<String, io::Error> {
         
         let pool_opt = PollOpt::edge() | PollOpt::oneshot();
         
@@ -317,7 +300,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
 
     
-    fn set_timer(&mut self, token: &Token, timeout: Option<Timeout>, timer_mode: TimerMode, event_loop: &mut EventLoop<MyHandler<Out>>) -> (Option<Timeout>, String) {
+    fn set_timer(&mut self, token: &Token, timeout: Option<Timeout>, timer_mode: TimerMode, event_loop: &mut EvLoop<Out>) -> (Option<Timeout>, String) {
         
         match timeout {
             
@@ -367,7 +350,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         }
     }
     
-    fn insert_connection(&mut self, token: &Token, connection: Connection, old_event: Event, timeout: Option<Timeout>, event_loop: &mut EventLoop<MyHandler<Out>>) {
+    fn insert_connection(&mut self, token: &Token, connection: Connection, old_event: Event, timeout: Option<Timeout>, event_loop: &mut EvLoop<Out>) {
 
         let new_event = connection.get_event();
         
@@ -394,13 +377,54 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         task_async::log_debug(format!("count hasmapy after insert {}", self.hash.len()));
     }
     
-    fn get_connection(&mut self, token: &Token) -> Option<(Connection, Event, Option<Timeout>)> {
-
+    fn get_connection<F>(&mut self, event_loop: &mut EvLoop<Out>, token: &Token, process: F) -> Option<Request>
+        where F : FnOnce(Connection) -> (Option<Connection>, Option<Request>) {
+        
         let res = self.hash.remove(&token);
         
         task_async::log_debug(format!("hashmap after decrement {}", self.hash.len()));
         
-        res
+        match res {
+            
+            Some((connection_prev, old_event, timeout)) => {
+                
+                let (result, request_opt) = process(connection_prev);
+                
+                match result {
+                    
+                    Some(connection_new) => {
+                        
+                        self.insert_connection(&token, connection_new, old_event, timeout, event_loop);
+                    },
+                    
+                    None => {
+                        
+                        if let Some(ref timeout_value) = timeout {
+                            let _ = event_loop.clear_timeout(timeout_value);
+                        }
+                        
+                        
+                        //TODO - trzeba zrobić odzyskiwanie połączenia ...
+                        //czyli callback może zwrócić albo Connection, albo Strem
+                        //gdy zwróci stream, to trzeba je wyrejestrować
+                        
+                        //event_loop.deregister(stream);
+                        
+                        //http://rustdoc.s3-website-us-east-1.amazonaws.com/mio/master/mio/struct.EventLoop.html#method.deregister
+                    }
+                };
+                
+                request_opt
+                
+            },
+            
+            None => {
+                
+                task_async::log_info(format!("miohttp {} -> no socket by token", token.as_usize()));
+                
+                None
+            }
+        }
     }
 
 
