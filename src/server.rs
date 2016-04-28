@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use mio::{Token, EventLoop, EventSet, PollOpt, Handler, Timeout};
-use mio::tcp::{TcpListener};
+use mio::tcp::{TcpListener, TcpStream};
 //use mio::util::Slab;                 //TODO - użyć tego modułu zamiast hashmapy
 use std::mem;
 use response;
@@ -152,9 +152,9 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     
     fn send_data_to_user(&mut self, event_loop: &mut EvLoop<Out>, token: Token, response: response::Response) {
         
-        self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Option<Connection>, Option<Request>) {
+        self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
 
-            (Some(connection_prev.send_data_to_user(token.clone(), response)), None)
+            (Ok(connection_prev.send_data_to_user(token.clone(), response)), None)
         });
     }
     
@@ -163,10 +163,10 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         
         let token = token.clone();
         
-        self.get_connection(event_loop, &token, move|_ : Connection| -> (Option<Connection>, Option<Request>) {
+        self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
             
             task_async::log_debug(format!("miohttp {} -> timeout_trigger ok", token.as_usize()));
-            (None, None)
+            (Err(connection_prev.get_stream()), None)
         });
     }
     
@@ -228,30 +228,30 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         let token       = token.clone();
         let server_down = self.server.is_none();
         
-        let request_opt = self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Option<Connection>, Option<Request>) {
+        let request_opt = self.get_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
 
             let (connection_opt, request_opt) = connection_prev.ready(events, &token, server_down);
 
             match connection_opt {
 
-                Some(connection) => {
+                Ok(connection) => {
 
                     match request_opt {
 
                         Some(request) => {
                             
-                            (Some(connection), Some(request))
+                            (Ok(connection), Some(request))
                         }
 
                         None => {
-                            (Some(connection), None)
+                            (Ok(connection), None)
                         }
                     }
                 },
 
-                None => {
+                Err(stream) => {
                     
-                    (None, None)
+                    (Err(stream), None)
                 }
             }
         });
@@ -378,7 +378,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
     
     fn get_connection<F>(&mut self, event_loop: &mut EvLoop<Out>, token: &Token, process: F) -> Option<Request>
-        where F : FnOnce(Connection) -> (Option<Connection>, Option<Request>) {
+        where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<Request>) {
         
         let res = self.hash.remove(&token);
         
@@ -388,16 +388,16 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
             
             Some((connection_prev, old_event, timeout)) => {
                 
-                let (result, request_opt) = process(connection_prev);
+                let (conenction_opt, request_opt) = process(connection_prev);
                 
-                match result {
+                match conenction_opt {
                     
-                    Some(connection_new) => {
+                    Ok(connection_new) => {
                         
                         self.insert_connection(&token, connection_new, old_event, timeout, event_loop);
                     },
                     
-                    None => {
+                    Err(stream) => {
                         
                         if let Some(ref timeout_value) = timeout {
                             let _ = event_loop.clear_timeout(timeout_value);

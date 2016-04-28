@@ -49,6 +49,10 @@ impl Connection {
         }
     }
     
+    pub fn get_stream(self) -> TcpStream {
+        self.stream
+    }
+    
     pub fn send_data_to_user(self, token: Token, response: response::Response) -> Connection {
         
         match self.mode {
@@ -106,18 +110,18 @@ impl Connection {
         }
     }
     
-    pub fn ready(self, events: EventSet, token: &Token, server_down: bool) -> (Option<Connection>, Option<Request>) {
+    pub fn ready(self, events: EventSet, token: &Token, server_down: bool) -> (Result<Connection, TcpStream>, Option<Request>) {
         
         if events.is_error() {
             
             task_async::log_error(format!("miohttp {} -> ready error, {:?}", token.as_usize(), events));
-            return (None, None);
+            return (Err(self.get_stream()), None);
         }
         
         if events.is_hup() {
             
             task_async::log_info(format!("miohttp {} -> ready, event hup, {:?}", token.as_usize(), events));
-            return (None, None);
+            return (Err(self.get_stream()), None);
         }
         
         
@@ -130,7 +134,7 @@ impl Connection {
             
             ConnectionMode::WaitingForServerResponse(keep_alive) => {
 
-                (Some(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive))), None)
+                (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive))), None)
             }
             
             ConnectionMode::SendingResponse(keep_alive, str, done) => {
@@ -141,7 +145,7 @@ impl Connection {
     }
 }
 
-fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize, token: &Token) -> (Option<Connection>, Option<Request>) {
+fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize, token: &Token) -> (Result<Connection, TcpStream>, Option<Request>) {
 
     if events.is_readable() {
 
@@ -168,7 +172,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                                     
                                     let keep_alive = request.is_header_set("Connection", "keep-alive");
                                     
-                                    (Some(Connection::make(stream, ConnectionMode::WaitingForServerResponse(keep_alive))), Some(request))
+                                    (Ok(Connection::make(stream, ConnectionMode::WaitingForServerResponse(keep_alive))), Some(request))
                                 }
 
                                 Err(err) => {
@@ -176,7 +180,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                                     task_async::log_error(format!("miohttp {} -> error prepare request, {:?}", token.as_usize(), err));
                                     
                                     let response_400 = response::Response::create_400();
-                                    (Some(Connection::make(stream, ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0))), None)
+                                    (Ok(Connection::make(stream, ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0))), None)
                                 }
                             }
                         }
@@ -184,7 +188,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                                                             //częściowe parsowanie
                         Ok(httparse::Status::Partial) => {
 
-                            (Some(Connection::make(stream, ConnectionMode::ReadingRequest(buf, done))), None)
+                            (Ok(Connection::make(stream, ConnectionMode::ReadingRequest(buf, done))), None)
                         }
 
                         Err(err) => {
@@ -204,7 +208,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                             /* HeaderName, HeaderValue, NewLine, Status, Token, TooManyHeaders, Version */
                             
                             let response_400 = response::Response::create_400();
-                            (Some(Connection::make(stream, ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0))), None)
+                            (Ok(Connection::make(stream, ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0))), None)
                         }
                     }
 
@@ -217,19 +221,19 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 
                 } else {
 
-                    (Some(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None)
+                    (Ok(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None)
                 }
             }
 
             Ok(None) => {
-                (Some(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None)
+                (Ok(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None)
             }
 
             Err(err) => {
                 
                 task_async::log_error(format!("miohttp {} -> error read from socket, {:?}", token.as_usize(), err));
                 
-                (Some(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None)
+                (Ok(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None)
             }
         }
 
@@ -245,12 +249,12 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 
         //trzeba też ustawić jakiś timeout czekania na dane od użytkownika
 
-        (Some(Connection::make(stream, ConnectionMode::ReadingRequest(buf, done))), None)
+        (Ok(Connection::make(stream, ConnectionMode::ReadingRequest(buf, done))), None)
     }
 }
 
 
-fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize, server_down: bool) -> Option<Connection> {
+fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize, server_down: bool) -> Result<Connection, TcpStream> {
 
     if events.is_writable() {
 
@@ -271,16 +275,17 @@ fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_ali
 
                             task_async::log_debug(format!("miohttp {} -> keep alive", token.as_usize()));
                             
-                            return Some(Connection::make(stream, (ConnectionMode::ReadingRequest([0u8; 2048], 0))));
+                            return Ok(Connection::make(stream, (ConnectionMode::ReadingRequest([0u8; 2048], 0))));
 
                                                     //close connection
                         } else {
-                            return None;
+                            
+                            return Err(stream);
                         }
 
                     } else if done < str.len() {
 
-                        return Some(Connection::make(stream, (ConnectionMode::SendingResponse(keep_alive, str, done))));
+                        return Ok(Connection::make(stream, (ConnectionMode::SendingResponse(keep_alive, str, done))));
 
                     } else {
 
@@ -289,24 +294,24 @@ fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_ali
 
                 } else {
 
-                    return Some(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)));
+                    return Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)));
                 }
             }
 
             Ok(None) => {
 
-                Some(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
+                Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
             }
 
             Err(err) => {
 
                 task_async::log_error(format!("miohttp {} -> error write to socket, {:?}", token.as_usize(), err));
-                Some(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
+                Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
             }
         }
 
     } else {
 
-        Some(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
+        Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
     }
 }
