@@ -3,7 +3,6 @@ extern crate httparse;
 extern crate net2;
 extern crate libc;
 extern crate task_async;
-extern crate channels_async;
 
 mod token_gen;
 mod request;

@@ -15,7 +15,3 @@ git = "https://github.com/carllerche/mio"
 
 [dependencies.task_async]
 git = "https://github.com/szagi3891/task_async-rs"
-
-[dependencies.channels_async]
-git = "https://github.com/szagi3891/channels_async-rs"
-#path = "../channels_async-rs"

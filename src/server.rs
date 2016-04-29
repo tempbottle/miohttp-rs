@@ -12,26 +12,21 @@ use respchan::Respchan;
 use new_socket::new_socket;
 use miodown::MioDown;
 use task_async::{self, callback0};
-use channels_async::Sender;
 use std::time::Duration;
 
 
-
-pub type FnConvert<Out> = Box<Fn((Request, Respchan)) -> Out + Send + Sync + 'static>;
-
-pub type EvLoop<Out> = EventLoop<MyHandler<Out>>;
+pub type FnReceiver = Box<Fn((Request, Respchan)) + Send + Sync + 'static>;
 
 
 // Define a handler to process the events
-pub struct MyHandler<Out> where Out : Send + Sync + 'static {
+pub struct MyHandler {
     token           : Token,
     server          : Option<TcpListener>,                  //Some - serwer nasłuchuje, None - jest w trybie wyłączania
     hash            : HashMap<Token, (Connection, Event, Option<Timeout>)>,
     tokens          : TokenGen,
-    channel         : Sender<Out>,                  //TODO - trzeba użyć typu generycznego i pozbyć się tej zależności
     timeout_reading : u64,
     timeout_writing : u64,
-    convert_request : FnConvert<Out>,
+    fn_receiver     : FnReceiver,
 }
 
 
@@ -52,7 +47,7 @@ pub enum MioMessage {
 }
 
 
-pub fn new_server<Out>(addres: String, timeout_reading: u64, timeout_writing:u64, tx: Sender<Out>, convert : FnConvert<Out>) -> (MioDown, callback0::CallbackBox) where Out : Send + Sync + 'static {
+pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_receiver : FnReceiver) -> (MioDown, callback0::CallbackBox) {
 
     let mut event_loop = EventLoop::new().unwrap();
 
@@ -68,15 +63,14 @@ pub fn new_server<Out>(addres: String, timeout_reading: u64, timeout_writing:u64
 
         event_loop.register(&server, token, EventSet::readable(), PollOpt::edge()).unwrap();
 
-        let mut inst = MyHandler::<Out> {
+        let mut inst = MyHandler {
             token           : token,
             server          : Some(server),
             hash            : HashMap::new(),
             tokens          : tokens,
-            channel         : tx,
             timeout_reading : timeout_reading,
             timeout_writing : timeout_writing,
-            convert_request : convert,
+            fn_receiver     : fn_receiver,
         };
 
         event_loop.run(&mut inst).unwrap();
@@ -86,12 +80,12 @@ pub fn new_server<Out>(addres: String, timeout_reading: u64, timeout_writing:u64
 }
 
 
-impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
+impl Handler for MyHandler {
 
     type Timeout = Token;
     type Message = MioMessage;
 
-    fn ready(&mut self, event_loop: &mut EvLoop<Out>, token: Token, events: EventSet) {
+    fn ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, events: EventSet) {
 
         task_async::log_debug(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self.token));
 
@@ -141,16 +135,16 @@ impl<Out> Handler for MyHandler<Out> where Out : Send + Sync + 'static {
 }
 
 
-impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
+impl MyHandler {
     
-    fn test_close_mio(&self, event_loop: &mut EvLoop<Out>) {
+    fn test_close_mio(&self, event_loop: &mut EventLoop<MyHandler>) {
         
         if self.server.is_none() && self.hash.len() == 0 {
             event_loop.shutdown();
         }
     }
     
-    fn send_data_to_user(&mut self, event_loop: &mut EvLoop<Out>, token: Token, response: response::Response) {
+    fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, response: response::Response) {
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
 
@@ -159,7 +153,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
     
     
-    fn timeout_trigger(&mut self, token: &Token, event_loop: &mut EvLoop<Out>) {
+    fn timeout_trigger(&mut self, token: &Token, event_loop: &mut EventLoop<MyHandler>) {
         
         let token = token.clone();
         
@@ -171,7 +165,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
     
     
-    fn new_connection(&mut self, event_loop: &mut EvLoop<Out>) {
+    fn new_connection(&mut self, event_loop: &mut EventLoop<MyHandler>) {
         
         let new_connections = match &(self.server) {
 
@@ -223,7 +217,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
     
     
-    fn socket_ready(&mut self, event_loop: &mut EvLoop<Out>, token: &Token, events: EventSet) {
+    fn socket_ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, events: EventSet) {
         
         let token       = token.clone();
         let server_down = self.server.is_none();
@@ -259,14 +253,13 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         if let Some(request) = request_opt {
             
             let respchan = Respchan::new(token.clone(), event_loop.channel());
-
-            let pack_request = (self.convert_request)((request, respchan));
-            self.channel.send(pack_request).unwrap();    
+            
+            (self.fn_receiver)((request, respchan));
         }
     }
 
 
-    fn set_event(&mut self, connection: &Connection, token: &Token, old_event: &Event, new_event: &Event, event_loop: &mut EvLoop<Out>) -> Result<String, io::Error> {
+    fn set_event(&mut self, connection: &Connection, token: &Token, old_event: &Event, new_event: &Event, event_loop: &mut EventLoop<MyHandler>) -> Result<String, io::Error> {
         
         let pool_opt = PollOpt::edge() | PollOpt::oneshot();
         
@@ -300,7 +293,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
     }
 
     
-    fn set_timer(&mut self, token: &Token, timeout: Option<Timeout>, timer_mode: TimerMode, event_loop: &mut EvLoop<Out>) -> (Option<Timeout>, String) {
+    fn set_timer(&mut self, token: &Token, timeout: Option<Timeout>, timer_mode: TimerMode, event_loop: &mut EventLoop<MyHandler>) -> (Option<Timeout>, String) {
         
         match timeout {
             
@@ -350,7 +343,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         }
     }
     
-    fn insert_connection(&mut self, token: &Token, connection: Connection, old_event: Event, timeout: Option<Timeout>, event_loop: &mut EvLoop<Out>) {
+    fn insert_connection(&mut self, token: &Token, connection: Connection, old_event: Event, timeout: Option<Timeout>, event_loop: &mut EventLoop<MyHandler>) {
 
         let new_event = connection.get_event();
         
@@ -377,7 +370,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
         task_async::log_debug(format!("count hasmapy after insert {}", self.hash.len()));
     }
     
-    fn transform_connection<F>(&mut self, event_loop: &mut EvLoop<Out>, token: &Token, process: F) -> Option<Request>
+    fn transform_connection<F>(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, process: F) -> Option<Request>
         where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<Request>) {
         
         let res = self.hash.remove(&token);
@@ -403,7 +396,7 @@ impl<Out> MyHandler<Out> where Out : Send + Sync + 'static {
                             let _ = event_loop.clear_timeout(timeout_value);
                         }
                         
-                        event_loop.deregister(&stream);
+                        event_loop.deregister(&stream).unwrap();
                     }
                 };
                 
