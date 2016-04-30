@@ -10,20 +10,23 @@ fn main() {
     println!("hello group");
     
     
-    //TODO - pozbyć się zależności od task_async
     
-    /*
     let log_error = Box::new(|is_error : bool, message:String|{
         
-        println!("mess");
+        if is_error {
+            
+            println!("ERROR: {}", message);
+            
+        } else {
+            
+            println!("LOG  : {}", message);
+        }
     });
-    Some(log_error), 
-    */
     
     
     let addres = "127.0.0.1:9876".to_owned();
     
-    let (miostart, miodown) = new_server(addres, 4000, 4000, Box::new(move|(request, respchan):(Request, Respchan)| {
+    let (miostart, miodown) = new_server(addres, 4000, 4000, Some(log_error), Box::new(move|(request, respchan):(Request, Respchan)| {
         
         let resp = Response::create(Code::Code200, Type::TextHtml, "Hello world -> ".to_owned() + request.path());
         

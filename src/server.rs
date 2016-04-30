@@ -5,18 +5,18 @@ use mio::tcp::{TcpListener, TcpStream};
 //use mio::util::Slab;                 //TODO - użyć tego modułu zamiast hashmapy
 use std::mem;
 use response;
-use connection::{Connection, TimerMode};
+use connection::{Connection, TimerMode, LogMessage};
 use token_gen::TokenGen;
 use request::Request;
 use respchan::Respchan;
 use new_socket::new_socket;
 use miostart::MioStart;
 use miodown::MioDown;
-use task_async;
 use std::time::Duration;
 
 
 pub type FnReceiver = Box<Fn((Request, Respchan)) + Send + Sync + 'static>;
+pub type FnLog      = Box<Fn(bool, String) + Send + Sync + 'static>;
 
 
 // Define a handler to process the events
@@ -27,6 +27,7 @@ pub struct MyHandler {
     tokens          : TokenGen,
     timeout_reading : u64,
     timeout_writing : u64,
+    fn_log          : Option<FnLog>,
     fn_receiver     : FnReceiver,
 }
 
@@ -48,7 +49,9 @@ pub enum MioMessage {
 }
 
 
-pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_receiver : FnReceiver) -> (MioStart, MioDown) {
+///Box::new(|is_error : bool, message:String|{
+
+pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_log: Option<FnLog>, fn_receiver : FnReceiver) -> (MioStart, MioDown) {
 
     let mut event_loop = EventLoop::new().unwrap();
 
@@ -71,6 +74,7 @@ pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_
             tokens          : tokens,
             timeout_reading : timeout_reading,
             timeout_writing : timeout_writing,
+            fn_log          : fn_log,
             fn_receiver     : fn_receiver,
         };
 
@@ -85,10 +89,11 @@ impl Handler for MyHandler {
 
     type Timeout = Token;
     type Message = MioMessage;
-
+    
     fn ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, events: EventSet) {
 
-        task_async::log_debug(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self.token));
+        let self_token = self.token.clone();
+        self.log_mess(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self_token));
 
         if token == self.token {
             self.new_connection(event_loop);
@@ -138,6 +143,22 @@ impl Handler for MyHandler {
 
 impl MyHandler {
     
+    fn log_error(&self, mess : String) {
+        
+        match self.fn_log {
+            Some(ref fn_log) => fn_log(true, mess),
+            None => {}
+        }
+    }
+    
+    fn log_mess(&self, mess : String) {
+        
+        match self.fn_log {
+            Some(ref fn_log) => fn_log(false, mess),
+            None => {}
+        }
+    }
+    
     fn test_close_mio(&self, event_loop: &mut EventLoop<MyHandler>) {
         
         if self.server.is_none() && self.hash.len() == 0 {
@@ -147,21 +168,23 @@ impl MyHandler {
     
     fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, response: response::Response) {
         
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
 
-            (Ok(connection_prev.send_data_to_user(token.clone(), response)), None)
+            (Ok(connection_prev.send_data_to_user(token.clone(), response)), None, LogMessage::None)
         });
     }
     
     
     fn timeout_trigger(&mut self, token: &Token, event_loop: &mut EventLoop<MyHandler>) {
         
-        let token = token.clone();
+        let token     = token.clone();
+        let is_server = token == self.token;
         
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
             
-            task_async::log_debug(format!("miohttp {} -> timeout_trigger ok", token.as_usize()));
-            (Err(connection_prev.get_stream()), None)
+            let log_mess = format!("miohttp {} -> timeout_trigger ok", token.as_usize());
+            
+            (Err(connection_prev.get_stream()), None, LogMessage::Message(log_mess))
         });
     }
     
@@ -176,7 +199,7 @@ impl MyHandler {
             },
             
             &None => {
-                task_async::log_info(format!("serwer znajduje się w trybie wyłączania"));
+                self.log_mess(format!("serwer znajduje się w trybie wyłączania"));
                 Vec::new()
             }
         };
@@ -184,8 +207,8 @@ impl MyHandler {
         for (addr, connection) in new_connections {
             
             let token = self.tokens.get();
-
-            task_async::log_info(format!("miohttp {} -> new connection, addr = {}", token.as_usize(), addr));
+            
+            self.log_mess(format!("miohttp {} -> new connection, addr = {}", token.as_usize(), addr));
 
             self.insert_connection(&token, connection, Event::Init, None, event_loop);
         }
@@ -210,7 +233,7 @@ impl MyHandler {
 
                 Err(err) => {
 
-                    task_async::log_error(format!("miohttp {} -> new connection err {}", self.token.as_usize(), err));
+                    self.log_error(format!("miohttp {} -> new connection err {}", self.token.as_usize(), err));
                     return list;
                 }
             };
@@ -223,9 +246,9 @@ impl MyHandler {
         let token       = token.clone();
         let server_down = self.server.is_none();
         
-        let request_opt = self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
 
-            let (connection_opt, request_opt) = connection_prev.ready(events, &token, server_down);
+            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, &token, server_down);
 
             match connection_opt {
 
@@ -235,28 +258,21 @@ impl MyHandler {
 
                         Some(request) => {
                             
-                            (Ok(connection), Some(request))
+                            (Ok(connection), Some(request), log_message)
                         }
 
                         None => {
-                            (Ok(connection), None)
+                            (Ok(connection), None, log_message)
                         }
                     }
                 },
 
                 Err(stream) => {
                     
-                    (Err(stream), None)
+                    (Err(stream), None, log_message)
                 }
             }
         });
-        
-        if let Some(request) = request_opt {
-            
-            let respchan = Respchan::new(token.clone(), event_loop.channel());
-            
-            (self.fn_receiver)((request, respchan));
-        }
     }
 
 
@@ -352,7 +368,7 @@ impl MyHandler {
             match self.set_event(&connection, token, &old_event, &new_event, event_loop) {
                 Ok(str) => str,
                 Err(err) => {
-                    task_async::log_error(format!("set_event: {}", err));
+                    self.log_error(format!("set_event: {}", err));
                     return;
                 }
             }
@@ -364,25 +380,25 @@ impl MyHandler {
         let (new_timer, timer_message) = self.set_timer(token, timeout, connection.get_timer_mode(), event_loop);
         
         
-        task_async::log_debug(format!("miohttp {} -> set mode {}, {}, timer {}", token.as_usize(), connection.get_name(), mess_event, timer_message));
+        self.log_mess(format!("miohttp {} -> set mode {}, {}, timer {}", token.as_usize(), connection.get_name(), mess_event, timer_message));
         
         self.hash.insert(token.clone(), (connection, new_event, new_timer));
         
-        task_async::log_debug(format!("count hasmapy after insert {}", self.hash.len()));
+        self.log_mess(format!("count hasmapy after insert {}", self.hash.len()));
     }
     
-    fn transform_connection<F>(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, process: F) -> Option<Request>
-        where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<Request>) {
+    fn transform_connection<F>(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, process: F)
+        where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
         
         let res = self.hash.remove(&token);
         
-        task_async::log_debug(format!("hashmap after decrement {}", self.hash.len()));
+        self.log_mess(format!("hashmap after decrement {}", self.hash.len()));
         
         match res {
             
             Some((connection_prev, old_event, timeout)) => {
                 
-                let (conenction_opt, request_opt) = process(connection_prev);
+                let (conenction_opt, request_opt, log_message) = process(connection_prev);
                 
                 match conenction_opt {
                     
@@ -401,17 +417,27 @@ impl MyHandler {
                     }
                 };
                 
-                request_opt
                 
+                match log_message {
+                    LogMessage::Message(mess) => self.log_mess(mess),
+                    LogMessage::Error(mess) => self.log_error(mess),
+                    LogMessage::None => {},
+                }
+                
+                
+                if let Some(request) = request_opt {
+
+                    let respchan = Respchan::new(token.clone(), event_loop.channel());
+
+                    (self.fn_receiver)((request, respchan));
+                }
             },
             
             None => {
                 
-                task_async::log_info(format!("miohttp {} -> no socket by token", token.as_usize()));
-                
-                None
+                self.log_mess(format!("miohttp {} -> no socket by token", token.as_usize()));
             }
-        }
+        };
     }
 
 
