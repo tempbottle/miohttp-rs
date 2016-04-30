@@ -10,8 +10,9 @@ use token_gen::TokenGen;
 use request::Request;
 use respchan::Respchan;
 use new_socket::new_socket;
+use miostart::MioStart;
 use miodown::MioDown;
-use task_async::{self, callback0};
+use task_async;
 use std::time::Duration;
 
 
@@ -47,13 +48,13 @@ pub enum MioMessage {
 }
 
 
-pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_receiver : FnReceiver) -> (MioDown, callback0::CallbackBox) {
+pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_receiver : FnReceiver) -> (MioStart, MioDown) {
 
     let mut event_loop = EventLoop::new().unwrap();
 
     let chan_shoutdown = event_loop.channel();
 
-    let fn_start = callback0::new(Box::new(move ||{
+    let fn_start = Box::new(move ||{
 
         let server = new_socket(addres);
 
@@ -74,9 +75,9 @@ pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_
         };
 
         event_loop.run(&mut inst).unwrap();
-    }));
+    });
 
-    (MioDown::new(chan_shoutdown), fn_start)
+    (MioStart::new(fn_start), MioDown::new(chan_shoutdown), )
 }
 
 

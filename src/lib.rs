@@ -1,3 +1,5 @@
+#![feature(fnbox)]
+
 extern crate mio;
 extern crate httparse;
 extern crate net2;
@@ -11,6 +13,7 @@ mod connection;
 mod server;
 mod respchan;
 mod new_socket;
+mod miostart;
 mod miodown;
 mod typemod;
 mod code;
@@ -19,12 +22,10 @@ pub use server::new_server;
 pub use request::Request;
 pub use response::Response;
 pub use respchan::Respchan;
+pub use miostart::MioStart;
 pub use miodown::MioDown;
 pub use typemod::Type;
 pub use code::Code;
-
-//TODO - channels_async
-    //mayby, this dependence to remove
 
 
 
