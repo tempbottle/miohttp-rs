@@ -169,16 +169,17 @@ impl MyHandler {
     fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, response: response::Response) {
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
-
-            (Ok(connection_prev.send_data_to_user(token.clone(), response)), None, LogMessage::None)
+            
+            let (new_conn, log_message) = connection_prev.send_data_to_user(token.clone(), response);
+            
+            (Ok(new_conn), None, log_message)
         });
     }
     
     
     fn timeout_trigger(&mut self, token: &Token, event_loop: &mut EventLoop<MyHandler>) {
         
-        let token     = token.clone();
-        let is_server = token == self.token;
+        let token = token.clone();
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
             

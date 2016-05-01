@@ -12,6 +12,3 @@ libc = "0.1"
 
 [dependencies.mio]
 git = "https://github.com/carllerche/mio"
-
-[dependencies.task_async]
-git = "https://github.com/szagi3891/task_async-rs"

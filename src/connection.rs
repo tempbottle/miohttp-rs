@@ -4,7 +4,6 @@ use httparse;
 use server::{Event};
 use request::Request;
 use response;
-use task_async;
 
 enum ConnectionMode {
 
@@ -61,7 +60,7 @@ impl Connection {
         self.stream
     }
     
-    pub fn send_data_to_user(self, token: Token, response: response::Response) -> Connection {
+    pub fn send_data_to_user(self, token: Token, response: response::Response) -> (Connection, LogMessage) {
         
         match self.mode {
 
@@ -73,16 +72,19 @@ impl Connection {
                     keep_alive
                 };
                 
-                Connection {
+                let conn = Connection {
                     stream : self.stream,
                     mode   : ConnectionMode::SendingResponse(new_keep_alive, response.as_bytes(), 0),
-                }
+                };
+                
+                (conn, LogMessage::None)
             }
 
             _ => {
                 
-                task_async::log_error(format!("miohttp {} -> send_data_to_user: incorect state", token.as_usize()));
-                self
+                let mess = format!("miohttp {} -> send_data_to_user: incorect state", token.as_usize());
+                
+                (self, LogMessage::Error(mess))
             }
         }
 
@@ -149,7 +151,9 @@ impl Connection {
             
             ConnectionMode::SendingResponse(keep_alive, str, done) => {
 
-                (transform_from_sending_to_user(self.stream, token, keep_alive, events, str, done, server_down), None, LogMessage::None)
+                let (new_conn, log_mess) = transform_from_sending_to_user(self.stream, token, keep_alive, events, str, done, server_down);
+                
+                (new_conn, None, log_mess)
             }
         }
     }
@@ -244,9 +248,9 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 
             Err(err) => {
                 
-                task_async::log_error(format!("miohttp {} -> error read from socket, {:?}", token.as_usize(), err));
+                let message = format!("miohttp {} -> error read from socket, {:?}", token.as_usize(), err);
                 
-                (Ok(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None, LogMessage::None)
+                (Ok(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None, LogMessage::Error(message))
             }
         }
 
@@ -267,7 +271,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 }
 
 
-fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize, server_down: bool) -> Result<Connection, TcpStream> {
+fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize, server_down: bool) -> (Result<Connection, TcpStream>, LogMessage) {
 
     if events.is_writable() {
 
@@ -286,19 +290,23 @@ fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_ali
                         
                         if server_down == false && keep_alive == true {
 
-                            task_async::log_debug(format!("miohttp {} -> keep alive", token.as_usize()));
+                            let mess = format!("miohttp {} -> keep alive", token.as_usize());
                             
-                            return Ok(Connection::make(stream, (ConnectionMode::ReadingRequest([0u8; 2048], 0))));
-
+                            let new_conn = Connection::make(stream, (ConnectionMode::ReadingRequest([0u8; 2048], 0)));
+                            
+                            return (Ok(new_conn), LogMessage::Message(mess));
+                            
                                                     //close connection
                         } else {
                             
-                            return Err(stream);
+                            return (Err(stream), LogMessage::None);
                         }
 
                     } else if done < str.len() {
-
-                        return Ok(Connection::make(stream, (ConnectionMode::SendingResponse(keep_alive, str, done))));
+                        
+                        let new_conn = Connection::make(stream, (ConnectionMode::SendingResponse(keep_alive, str, done)));
+                        
+                        return (Ok(new_conn), LogMessage::None);
 
                     } else {
 
@@ -306,25 +314,34 @@ fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_ali
                     }
 
                 } else {
-
-                    return Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)));
+                    
+                    let new_conn = Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done));
+                    
+                    return (Ok(new_conn), LogMessage::None);
                 }
             }
 
             Ok(None) => {
 
-                Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
+                let new_conn = Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done));
+                
+                (Ok(new_conn), LogMessage::None)
             }
 
             Err(err) => {
 
-                task_async::log_error(format!("miohttp {} -> error write to socket, {:?}", token.as_usize(), err));
-                Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
+                let message = format!("miohttp {} -> error write to socket, {:?}", token.as_usize(), err);
+                
+                let new_conn = Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done));
+                
+                return (Ok(new_conn), LogMessage::Error(message));
             }
         }
 
     } else {
 
-        Ok(Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done)))
+        let new_conn = Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done));
+        
+        (Ok(new_conn), LogMessage::None)
     }
 }
