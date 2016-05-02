@@ -1,9 +1,10 @@
-use mio::{Token, EventSet, TryRead, TryWrite};
+use mio::{Token, Sender, EventSet, TryRead, TryWrite};
 use mio::tcp::{TcpStream};
 use httparse;
-use server::{Event};
+use server::{Event, MioMessage};
 use request::Request;
 use response;
+use std::cmp::min;
 
 enum ConnectionMode {
 
@@ -169,7 +170,7 @@ impl Connection {
         }
     }
     
-    pub fn ready(mut self, events: EventSet, token: &Token, server_down: bool) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+    pub fn ready(mut self, events: EventSet, token: &Token, sender: Sender<MioMessage>, server_down: bool) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
         
         if events.is_error() {
             
@@ -190,20 +191,36 @@ impl Connection {
             
             ConnectionMode::ReadingRequest(buf, done) => {
 
-                transform_from_waiting_for_user(self.stream, events, buf, done, token)
+                transform_from_waiting_for_user(self.stream, events, buf, done, token, sender)
             },
             
             ConnectionMode::WaitingForServerResponse(keep_alive, connection_post) => {
                 
                 if let ConnectionPost::Reading(mut vec, len, callback_post) = connection_post {
                     
+                    
                     let mut buf : [u8; 2048] = [0; 2048];
                     
                     
                     loop {
-                        match self.stream.try_read(&mut buf) {
+                        
+                        
+                        if vec.len() == len {
+                            break;
+                        } else if vec.len() > len {
+                            unreachable!();
+                        }
+                        
+                        
+                        let max_index = min(len - vec.len(), 2048);
+                        
+                        match self.stream.try_read(&mut buf[0..max_index]) {
 
                             Ok(Some(size)) => {
+                                
+                                if size > max_index {
+                                    unreachable!();
+                                }
                                 
                                 vec.extend_from_slice(&buf[0..size]);
                                 
@@ -257,7 +274,7 @@ impl Connection {
     }
 }
 
-fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize, token: &Token) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize, token: &Token, sender: Sender<MioMessage>) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
 
     if events.is_readable() {
 
@@ -278,7 +295,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                         
                         Ok(httparse::Status::Complete(size_parse)) => {
                             
-                            match Request::new(req) {
+                            match Request::new(req, token.clone(), sender) {
 
                                 Ok(request) => {
                                     
@@ -295,7 +312,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                                             post_data.extend_from_slice(&buf[size_parse..size]);
                                             
                                             
-                                            if let Some(req_len) = request.get_content_length() {
+                                            if let Some(req_len) = request.get_header("Content-Length".to_owned()) {
                                                 
                                                 if req_len >= post_data.len() {
                                                     

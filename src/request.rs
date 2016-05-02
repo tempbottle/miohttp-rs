@@ -2,7 +2,8 @@ use std;
 use std::collections::HashMap;
 use httparse;
 use std::io::{Error, ErrorKind};
-
+use mio::{Token, Sender};
+use server::MioMessage;
 
 /*
 http://hyper.rs/hyper/hyper/header/struct.Headers.html
@@ -12,16 +13,18 @@ https://github.com/tailhook/rotor-http/blob/master/src/http1.rs
 
 
 pub struct Request {
-    method      : String,
-    path        : String,
-    version     : u8,
-    headers     : HashMap<Box<String>, String>,
+    method  : String,
+    path    : String,
+    version : u8,
+    headers : HashMap<Box<String>, String>,
+    token   : Token,
+    sender  : Sender<MioMessage>,
 }
 
 
 impl Request {    
 
-    pub fn new(req: httparse::Request) -> Result<Request, Error> {
+    pub fn new(req: httparse::Request, token: Token, sender: Sender<MioMessage>) -> Result<Request, Error> {
 
         match (req.method, req.path, req.version) {
 
@@ -49,10 +52,12 @@ impl Request {
                 }
 
                 Ok(Request{
-                    method      : method.to_owned(),
-                    path        : path.to_owned(),
-                    version     : version,
-                    headers     : headers,
+                    method  : method.to_owned(),
+                    path    : path.to_owned(),
+                    version : version,
+                    headers : headers,
+                    token   : token,
+                    sender  : sender,
                 })
             }
             _ => {
@@ -62,6 +67,13 @@ impl Request {
             }
         }
     }
+    
+    
+    pub fn get_post(self, callback: Box<Fn(Vec<u8>) + Send + Sync + 'static>) {
+        
+        self.sender.send(MioMessage::GetPost(self.token, callback)).unwrap();
+    }
+    
     
     pub fn is_header_set(&self, name: &str, value: &str) -> bool {
         
@@ -91,9 +103,9 @@ impl Request {
         self.version.clone()
     }
     
-    pub fn get_content_length(&self) -> Option<usize> {
+    pub fn get_header(&self, header: String) -> Option<usize> {
         
-        match self.headers.get(&Box::new("Content-Length".to_owned())) {
+        match self.headers.get(&Box::new(header)) {
             
             Some(value) => {
                 

@@ -46,10 +46,9 @@ pub enum Event {
 pub enum MioMessage {
     Response(Token, response::Response),
     Down,
+    GetPost(Token, Box<Fn(Vec<u8>) + Send + Sync + 'static>),
 }
 
-
-///Box::new(|is_error : bool, message:String|{
 
 pub fn new_server(addres: String, timeout_reading: u64, timeout_writing:u64, fn_log: Option<FnLog>, fn_receiver : FnReceiver) -> (MioStart, MioDown) {
 
@@ -128,6 +127,12 @@ impl Handler for MyHandler {
                         panic!("Powielony sygnał wyłączenia event_loop-a");
                     }
                 };
+            },
+            
+            MioMessage::GetPost(token, callback) => {
+                
+                //self.get_post(token, callback);
+                //weź połączenie, dodaj callbacka, i ju
             }
         };
     }
@@ -165,6 +170,7 @@ impl MyHandler {
             event_loop.shutdown();
         }
     }
+    
     
     fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, response: response::Response) {
         
@@ -246,10 +252,13 @@ impl MyHandler {
         
         let token       = token.clone();
         let server_down = self.server.is_none();
+        let channel     = event_loop.channel();
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
-
-            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, &token, server_down);
+            
+            //TODO - niepotrzebnie kanał jest klonowany przy każdym ready.
+            
+            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, &token, channel, server_down);
 
             match connection_opt {
 
