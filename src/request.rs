@@ -5,8 +5,18 @@ use std::io::{Error, ErrorKind};
 use std::sync::Arc;
 
 
+/*
+http://hyper.rs/hyper/hyper/header/struct.Headers.html
+                ta biblioteka wykorzystuje nagłówki dostarczane przez hyper-a
+https://github.com/tailhook/rotor-http/blob/master/src/http1.rs
+*/
+
+
 pub struct Request {
-    inner : Arc<RequestInner>,
+    method      : String,
+    path        : String,
+    version     : u8,
+    headers     : HashMap<Box<String>, String>,
 }
 
 
@@ -40,12 +50,10 @@ impl Request {
                 }
 
                 Ok(Request{
-                    inner : Arc::new(RequestInner{
-                        method      : method.to_owned(),
-                        path        : path.to_owned(),
-                        version     : version,
-                        headers     : headers,
-                    })
+                    method      : method.to_owned(),
+                    path        : path.to_owned(),
+                    version     : version,
+                    headers     : headers,
                 })
             }
             _ => {
@@ -56,56 +64,6 @@ impl Request {
         }
     }
     
-    
-    pub fn is_header_set(&self, name: &str, value: &str) -> bool {
-        self.inner.is_header_set(name, value)
-    }
-    
-    pub fn path(&self) -> &String {
-        self.inner.path()
-    }
-    
-    pub fn method(&self) -> &String {
-        self.inner.method()
-    }
-    
-    pub fn version(&self) -> u8 {
-        self.inner.version()
-    }
-}
-
-
-impl Clone for Request {
-    
-    fn clone(&self) -> Request {
-        
-        Request {
-            inner : self.inner.clone(),
-        }
-    }
-
-    fn clone_from(&mut self, request: &Request) {
-        self.inner = request.inner.clone();
-    }
-}
-
-
-struct RequestInner {
-    method      : String,
-    path        : String,
-    version     : u8,
-    headers     : HashMap<Box<String>, String>,
-}
-
-/*
-http://hyper.rs/hyper/hyper/header/struct.Headers.html
-                ta biblioteka wykorzystuje nagłówki dostarczane przez hyper-a
-https://github.com/tailhook/rotor-http/blob/master/src/http1.rs
-*/
-
-
-impl RequestInner {
-
     pub fn is_header_set(&self, name: &str, value: &str) -> bool {
         
         match self.headers.get(&Box::new(name.to_owned())) {
@@ -122,12 +80,33 @@ impl RequestInner {
         &(self.path)
     }
     
+    pub fn is_post(&self) -> bool {
+        self.method == "POST".to_owned()
+    }
+    
     pub fn method(&self) -> &String {
         &(self.method)
     }
     
     pub fn version(&self) -> u8 {
         self.version.clone()
+    }
+    
+    pub fn get_content_length(&self) -> Option<usize> {
+        
+        match self.headers.get(&Box::new("Content-Length".to_owned())) {
+            
+            Some(value) => {
+                
+                match value.parse() {
+                    Ok(value_parsed) => Some(value_parsed),
+                    Err(_) => None,
+                }
+            },
+            
+            None => None
+        }
+        
     }
 }
 

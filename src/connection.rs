@@ -10,9 +10,17 @@ enum ConnectionMode {
                                                     //czytanie requestu
     ReadingRequest([u8; 2048], usize),
                                                     //oczekiwanie na wygenerowanie odpowiedzi serwera (bool to keep alive)
-    WaitingForServerResponse(bool),
+    WaitingForServerResponse(bool, ConnectionPost),
                                                     //wysyłanie odpowiedz (bool to keep alive)
     SendingResponse(bool, Vec<u8>, usize),
+}
+
+enum ConnectionPost {
+    
+    None,
+    Data(Vec<u8>, usize),
+    Reading(Vec<u8>, usize, Box<Fn(Vec<u8>)>),
+    Complete,
 }
 
 
@@ -64,9 +72,19 @@ impl Connection {
         
         match self.mode {
 
-            ConnectionMode::WaitingForServerResponse(keep_alive) => {
+            ConnectionMode::WaitingForServerResponse(keep_alive, connection_post) => {
                 
-                let new_keep_alive = if response.close_connection() {
+                let connection_post_close = match connection_post {
+                    
+                    ConnectionPost::None => false,
+                    ConnectionPost::Data(_, _) => true,         //nieodebrane dane z posta, zamknij połączenie
+                    ConnectionPost::Reading(_,_,_) => {
+                        unreachable!();
+                    },
+                    ConnectionPost::Complete => false,
+                };
+                
+                let new_keep_alive = if response.close_connection() || connection_post_close {
                     false
                 } else {
                     keep_alive
@@ -94,9 +112,20 @@ impl Connection {
     pub fn get_event(&self) -> Event {
 
         match self.mode {
-            ConnectionMode::ReadingRequest(_, _)        => Event::Read,
-            ConnectionMode::WaitingForServerResponse(_) => Event::None,
-            ConnectionMode::SendingResponse(_, _, _)    => Event::Write,
+            
+            ConnectionMode::ReadingRequest(_, _) => Event::Read,
+            
+            ConnectionMode::WaitingForServerResponse(_, ref connection_post) => {
+                
+                match *connection_post {
+                    ConnectionPost::None => Event::None,
+                    ConnectionPost::Data(_,_) => Event::None,
+                    ConnectionPost::Reading(_,_,_) => Event::Read,
+                    ConnectionPost::Complete => Event::None,
+                }
+                
+            },
+            ConnectionMode::SendingResponse(_, _, _) => Event::Write,
         }
     }
     
@@ -104,9 +133,20 @@ impl Connection {
         
         match self.mode {
             
-            ConnectionMode::ReadingRequest(_, _)        => TimerMode::In,
-            ConnectionMode::WaitingForServerResponse(_) => TimerMode::None,
-            ConnectionMode::SendingResponse(_, _, _)    => TimerMode::Out,
+            ConnectionMode::ReadingRequest(_, _) => TimerMode::In,
+            
+            ConnectionMode::WaitingForServerResponse(_, ref connection_post) => {
+                
+                match *connection_post {
+                    ConnectionPost::None => TimerMode::None,
+                    ConnectionPost::Data(_,_) => TimerMode::None,
+                    ConnectionPost::Reading(_,_,_) => TimerMode::In,
+                    ConnectionPost::Complete => TimerMode::None,
+                }
+                
+            },
+            
+            ConnectionMode::SendingResponse(_, _, _) => TimerMode::Out,
         }
     }
     
@@ -114,9 +154,19 @@ impl Connection {
         
         match self.mode {
             
-            ConnectionMode::ReadingRequest(_, _)        => "ReadingRequest",
-            ConnectionMode::WaitingForServerResponse(_) => "WaitingForServerResponse",
-            ConnectionMode::SendingResponse(_, _, _)    => "SendingResponse"
+            ConnectionMode::ReadingRequest(_, _) => "ReadingRequest",
+            
+            ConnectionMode::WaitingForServerResponse(_, ref connection_post) => {
+                
+                match *connection_post {
+                    ConnectionPost::None => "WaitingForServerResponse (post none)",
+                    ConnectionPost::Data(_,_) => "WaitingForServerResponse (post data)",
+                    ConnectionPost::Reading(_,_,_) => "WaitingForServerResponse (post reading)",
+                    ConnectionPost::Complete => "WaitingForServerResponse (post complete)",
+                }
+            },
+            
+            ConnectionMode::SendingResponse(_, _, _) => "SendingResponse"
         }
     }
     
@@ -142,19 +192,65 @@ impl Connection {
             ConnectionMode::ReadingRequest(buf, done) => {
 
                 transform_from_waiting_for_user(self.stream, events, buf, done, token)
-            }
+            },
             
-            ConnectionMode::WaitingForServerResponse(keep_alive) => {
+            ConnectionMode::WaitingForServerResponse(keep_alive, connection_post) => {
+                
+                /*
+                if let ConnectionPost::Reading(vec, len, callback_post) = connection_post {
+                    
+                    let mut buf = [u8; 2048];
+                    
+                    loop {
+                        match stream.try_read(&mut buf) {
 
-                (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive))), None, LogMessage::None)
-            }
+                            Ok(Some(size)) => {
+                                
+                                //to może być dobre miejsce na przetwarzanie tego kawałka który napłynął
+                                
+                            },
+
+                            Ok(None) => {
+
+                                break;
+                            },
+
+                            Err(err) => {
+
+                                let message = format!("miohttp {} -> error write to socket, {:?}", token.as_usize(), err);
+
+                                let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post)));
+
+                                return (Ok(new_conn), None, LogMessage::Error(message));
+                            }
+                        }
+                    }
+                    
+                    
+                    if vec.len() == len {
+                        
+                        callback_post(vec);
+                        
+                        let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(ConnectionPost::Complete));
+
+                        return (Ok(new_conn), None, LogMessage::None);
+
+                    } else {
+
+                        //nic nie robimy, czekamy na kolejne dane od użytkownika
+                    }
+                }
+                */
+                
+                (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post))), None, LogMessage::None)
+            },
             
             ConnectionMode::SendingResponse(keep_alive, str, done) => {
 
                 let (new_conn, log_mess) = transform_from_sending_to_user(self.stream, token, keep_alive, events, str, done, server_down);
                 
                 (new_conn, None, log_mess)
-            }
+            },
         }
     }
 }
@@ -175,18 +271,61 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                     
                     let mut headers = [httparse::EMPTY_HEADER; 100];
                     let mut req     = httparse::Request::new(&mut headers);
-
-                    match req.parse(&buf) {
-
-                        Ok(httparse::Status::Complete(_)) => {      /*size_parse*/
+                    
+                    match req.parse(&buf[0..size]) {
+                        
+                        Ok(httparse::Status::Complete(size_parse)) => {
                             
                             match Request::new(req) {
 
                                 Ok(request) => {
                                     
+                                    
                                     let keep_alive = request.is_header_set("Connection", "keep-alive");
                                     
-                                    (Ok(Connection::make(stream, ConnectionMode::WaitingForServerResponse(keep_alive))), Some(request), LogMessage::None)
+                                    
+                                    let connection_post = if request.is_post() {
+                                        
+                                        if size > size_parse {
+                                            
+                                            let mut post_data = vec![];
+                                            
+                                            post_data.extend_from_slice(&buf[size_parse..size]);
+                                            
+                                            
+                                            if let Some(req_len) = request.get_content_length() {
+                                                
+                                                if req_len >= post_data.len() {
+                                                    
+                                                    ConnectionPost::Data(post_data, req_len)
+                                                    
+                                                } else {
+                                                    
+                                                    let response_400 = response::Response::create_400();
+                                                    let new_connection = ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0);
+                                                    return (Ok(Connection::make(stream, new_connection)), None, LogMessage::None)
+                                                }
+                                                
+                                            } else {
+                                                
+                                                let response_400 = response::Response::create_400();
+                                                let new_connection = ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0);
+                                                return (Ok(Connection::make(stream, new_connection)), None, LogMessage::None)
+                                            }
+                                            
+                                        } else {
+                                            
+                                            ConnectionPost::None
+                                        }
+                                        
+                                    } else {
+                                        
+                                        ConnectionPost::None
+                                    };
+                                    
+                                    
+                                    
+                                    (Ok(Connection::make(stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post))), Some(request), LogMessage::None)
                                 }
 
                                 Err(err) => {
@@ -203,7 +342,14 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 
                                                             //częściowe parsowanie
                         Ok(httparse::Status::Partial) => {
-
+                            
+                            if buf.len() == done {
+                                
+                                let response_400 = response::Response::create_400();
+                                let new_connection = ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0);
+                                return (Ok(Connection::make(stream, new_connection)), None, LogMessage::None)
+                            }
+                            
                             (Ok(Connection::make(stream, ConnectionMode::ReadingRequest(buf, done))), None, LogMessage::None)
                         }
 
@@ -254,18 +400,8 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
             }
         }
 
-
-
-        //czytaj, odczytane dane przekaż do parsera
-        //jeśli otrzymalismy poprawny obiekt requestu to :
-            // przełącz stan tego obiektu połączenia, na oczekiwanie na dane z serwera
-            // wyślij kanałem odpowiednią informację o requescie
-            // zwróć informację na zewnątrz tej funkcji że nic się nie dzieje z tym połaczeniem
-
     } else {
-
-        //trzeba też ustawić jakiś timeout czekania na dane od użytkownika
-
+        
         (Ok(Connection::make(stream, ConnectionMode::ReadingRequest(buf, done))), None, LogMessage::None)
     }
 }
