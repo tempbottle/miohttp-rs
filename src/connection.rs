@@ -23,7 +23,6 @@ enum ConnectionPost {
     Complete,
 }
 
-
 pub enum TimerMode {
     In,
     Out,
@@ -170,7 +169,7 @@ impl Connection {
         }
     }
     
-    pub fn ready(self, events: EventSet, token: &Token, server_down: bool) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+    pub fn ready(mut self, events: EventSet, token: &Token, server_down: bool) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
         
         if events.is_error() {
             
@@ -196,18 +195,19 @@ impl Connection {
             
             ConnectionMode::WaitingForServerResponse(keep_alive, connection_post) => {
                 
-                /*
-                if let ConnectionPost::Reading(vec, len, callback_post) = connection_post {
+                if let ConnectionPost::Reading(mut vec, len, callback_post) = connection_post {
                     
-                    let mut buf = [u8; 2048];
+                    let mut buf : [u8; 2048] = [0; 2048];
+                    
                     
                     loop {
-                        match stream.try_read(&mut buf) {
+                        match self.stream.try_read(&mut buf) {
 
                             Ok(Some(size)) => {
                                 
-                                //to może być dobre miejsce na przetwarzanie tego kawałka który napłynął
+                                vec.extend_from_slice(&buf[0..size]);
                                 
+                                //to może być dobre miejsce na parsowanie tego kawałka który napłynął
                             },
 
                             Ok(None) => {
@@ -224,23 +224,25 @@ impl Connection {
                                 return (Ok(new_conn), None, LogMessage::Error(message));
                             }
                         }
-                    }
+                    };
                     
                     
-                    if vec.len() == len {
+                    let connection_post = if vec.len() == len {
                         
                         callback_post(vec);
+                        ConnectionPost::Complete
                         
-                        let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(ConnectionPost::Complete));
-
-                        return (Ok(new_conn), None, LogMessage::None);
-
                     } else {
+                        
+                        ConnectionPost::Reading(vec, len, callback_post)
+                    };
+                    
+                    
+                    let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post));
 
-                        //nic nie robimy, czekamy na kolejne dane od użytkownika
-                    }
+                    return (Ok(new_conn), None, LogMessage::None);
                 }
-                */
+                
                 
                 (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post))), None, LogMessage::None)
             },

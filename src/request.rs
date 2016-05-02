@@ -2,7 +2,6 @@ use std;
 use std::collections::HashMap;
 use httparse;
 use std::io::{Error, ErrorKind};
-use std::sync::Arc;
 
 
 /*
