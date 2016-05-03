@@ -91,10 +91,9 @@ impl Handler for MyHandler {
     type Message = MioMessage;
     
     fn ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, events: EventSet) {
-
-        let self_token = self.token.clone();
-        self.log_mess(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self_token));
-
+        
+        self.log_mess(&token, format!("ready, {:?}", events));
+        
         if token == self.token {
             self.new_connection(event_loop);
         } else {
@@ -154,18 +153,33 @@ impl Handler for MyHandler {
 
 impl MyHandler {
     
-    fn log_error(&self, mess : String) {
+    //self.log_mess(format!("miohttp {} -> new connection, addr = {}", token.as_usize(), addr));
+    //LogMessage::Message(mess) => self.log_mess(format!("miohttp {} -> {}", token.as_usize(), mess)),
+    //self.log_mess(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self_token));
+    //if token == self.token {
+    
+    fn log_error(&self, token: &Token, mess : String) {
         
         match self.fn_log {
-            Some(ref fn_log) => fn_log(true, mess),
+            
+            Some(ref fn_log) => {
+                
+                fn_log(true, format!("miohttp {} / {} -> {}", token.as_usize(), self.hash.len(), mess))
+            },
+            
             None => {}
         }
     }
     
-    fn log_mess(&self, mess : String) {
+    fn log_mess(&self, token: &Token, mess : String) {
         
         match self.fn_log {
-            Some(ref fn_log) => fn_log(false, mess),
+            
+            Some(ref fn_log) => {
+                
+                fn_log(false, format!("miohttp {} / {} -> {}", token.as_usize(), self.hash.len(), mess))
+            },
+            
             None => {}
         }
     }
@@ -212,7 +226,8 @@ impl MyHandler {
             },
             
             &None => {
-                self.log_mess(format!("serwer znajduje się w trybie wyłączania"));
+                
+                self.log_mess(&self.token, "serwer znajduje się w trybie wyłączania".to_owned());
                 Vec::new()
             }
         };
@@ -221,7 +236,7 @@ impl MyHandler {
             
             let token = self.tokens.get();
             
-            self.log_mess(format!("miohttp {} -> new connection, addr = {}", token.as_usize(), addr));
+            self.log_mess(&token, format!("new connection, addr = {}", addr));
 
             self.insert_connection(&token, connection, Event::Init, None, event_loop);
         }
@@ -246,7 +261,7 @@ impl MyHandler {
 
                 Err(err) => {
 
-                    self.log_error(format!("miohttp {} -> new connection err {}", self.token.as_usize(), err));
+                    self.log_error(&self.token, format!("new connection err {}", err));
                     return list;
                 }
             };
@@ -389,7 +404,7 @@ impl MyHandler {
             match self.set_event(&connection, token, &old_event, &new_event, event_loop) {
                 Ok(str) => str,
                 Err(err) => {
-                    self.log_error(format!("set_event: {}", err));
+                    self.log_error(token, format!("set_event: {}", err));
                     return;
                 }
             }
@@ -401,7 +416,7 @@ impl MyHandler {
         let (new_timer, timer_message) = self.set_timer(token, timeout, connection.get_timer_mode(), event_loop);
         
         
-        self.log_mess(format!("miohttp {} -> set mode {}, {}, timer {}", token.as_usize(), connection.get_name(), mess_event, timer_message));
+        self.log_mess(token, format!("set mode {}, {}, timer {}", connection.get_name(), mess_event, timer_message));
         
         self.hash.insert(token.clone(), (connection, new_event, new_timer));
     }
@@ -439,8 +454,8 @@ impl MyHandler {
                 
                 
                 match log_message {
-                    LogMessage::Message(mess) => self.log_mess(format!("miohttp {} -> {}", token.as_usize(), mess)),
-                    LogMessage::Error(mess) => self.log_error(format!("miohttp {} -> {}", token.as_usize(), mess)),
+                    LogMessage::Message(mess) => self.log_mess(token, mess),
+                    LogMessage::Error(mess) => self.log_error(token, mess),
                     LogMessage::None => {},
                 }
                 
@@ -456,10 +471,7 @@ impl MyHandler {
             
             None => {
                 
-                let this_file    = file!();
-                let current_line = line!();
-                
-                self.log_error(format!("miohttp {} -> no socket by token in {}:{}", token.as_usize(), this_file, current_line));
+                self.log_error(token, "no socket by token".to_owned());
             }
         };
     }
