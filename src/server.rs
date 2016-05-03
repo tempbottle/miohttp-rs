@@ -16,8 +16,9 @@ use std::time::Duration;
 
 use std::boxed::FnBox;
 
-pub type FnReceiver = Box<Fn((Request, Respchan)) + Send + Sync + 'static>;
-pub type FnLog      = Box<Fn(bool, String) + Send + Sync + 'static>;
+pub type FnReceiver   = Box<Fn((Request, Respchan)) + Send + Sync + 'static>;
+pub type FnLog        = Box<Fn(bool, String) + Send + Sync + 'static>;
+pub type TransformOut = (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage);
 
 
 // Define a handler to process the events
@@ -95,12 +96,18 @@ impl Handler for MyHandler {
         self.log_mess(&token, format!("ready, {:?}", events));
         
         if token == self.token {
+            
             self.new_connection(event_loop);
+            
         } else {
-            self.socket_ready(event_loop, &token, events);
+            
+            let server_down = self.server.is_none();
+
+            self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> TransformOut {
+                
+                connection_prev.ready(events, server_down)
+            });
         }
-        
-        self.test_close_mio(event_loop);
     }
 
     fn notify(&mut self, event_loop: &mut EventLoop<Self>, msg: Self::Message) {
@@ -108,7 +115,13 @@ impl Handler for MyHandler {
         match msg {
             
             MioMessage::Response(token, response) => {
-                self.send_data_to_user(event_loop, token, response);
+                
+                self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> TransformOut {
+
+                    let (new_conn, log_message) = connection_prev.send_data_to_user(response);
+
+                    (Ok(new_conn), None, log_message)
+                });
             },
             
             MioMessage::Down => {
@@ -131,8 +144,7 @@ impl Handler for MyHandler {
             
             MioMessage::GetPost(token, callback) => {
                 
-                
-                self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
+                self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> TransformOut {
                     
                     let (conn, log_mess) = connection_prev.set_callback_post(callback);
                     
@@ -144,19 +156,18 @@ impl Handler for MyHandler {
 
     fn timeout(&mut self, event_loop: &mut EventLoop<Self>, token: Self::Timeout) {
         
-        self.timeout_trigger(&token, event_loop);
         
-        self.test_close_mio(event_loop);
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> TransformOut {
+
+            let (conn, mess) = connection_prev.timeout_trigger();
+
+            (conn, None, mess)
+        });
     }
 }
 
 
 impl MyHandler {
-    
-    //self.log_mess(format!("miohttp {} -> new connection, addr = {}", token.as_usize(), addr));
-    //LogMessage::Message(mess) => self.log_mess(format!("miohttp {} -> {}", token.as_usize(), mess)),
-    //self.log_mess(format!("miohttp {} -> ready, {:?} (is server = {})", token.as_usize(), events, token == self_token));
-    //if token == self.token {
     
     fn log_error(&self, token: &Token, mess : String) {
         
@@ -191,29 +202,6 @@ impl MyHandler {
         }
     }
     
-    
-    fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, response: response::Response) {
-        
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
-            
-            let (new_conn, log_message) = connection_prev.send_data_to_user(response);
-            
-            (Ok(new_conn), None, log_message)
-        });
-    }
-    
-    
-    fn timeout_trigger(&mut self, token: &Token, event_loop: &mut EventLoop<MyHandler>) {
-        
-        let token = token.clone();
-        
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
-            
-            let (conn, mess) = connection_prev.timeout_trigger();
-            
-            (conn, None, mess)
-        });
-    }
     
     
     fn new_connection(&mut self, event_loop: &mut EventLoop<MyHandler>) {
@@ -268,16 +256,6 @@ impl MyHandler {
         }
     }
     
-    
-    fn socket_ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, events: EventSet) {
-        
-        let server_down = self.server.is_none();
-        
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
-            
-            connection_prev.ready(events, server_down)
-        });
-    }
 
 
     fn set_event(&mut self, connection: &Connection, token: &Token, old_event: &Event, new_event: &Event, event_loop: &mut EventLoop<MyHandler>) -> Result<String, io::Error> {
@@ -453,6 +431,8 @@ impl MyHandler {
                 self.log_error(token, "no socket by token".to_owned());
             }
         };
+        
+        self.test_close_mio(event_loop);
     }
 }
 
