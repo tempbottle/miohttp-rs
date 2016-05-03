@@ -275,32 +275,7 @@ impl MyHandler {
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
             
-            //TODO - niepotrzebnie kanał jest klonowany przy każdym ready.
-            
-            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, server_down);
-
-            match connection_opt {
-
-                Ok(connection) => {
-
-                    match request_opt {
-
-                        Some(pre_request) => {
-                            
-                            (Ok(connection), Some(pre_request), log_message)
-                        }
-
-                        None => {
-                            (Ok(connection), None, log_message)
-                        }
-                    }
-                },
-
-                Err(stream) => {
-                    
-                    (Err(stream), None, log_message)
-                }
-            }
+            connection_prev.ready(events, server_down)
         });
     }
 
@@ -432,6 +407,14 @@ impl MyHandler {
                 
                 let (conenction_opt, request_opt, log_message) = process(connection_prev);
                 
+                
+                match log_message {
+                    LogMessage::Message(mess) => self.log_mess(token, mess),
+                    LogMessage::Error(mess) => self.log_error(token, mess),
+                    LogMessage::None => {},
+                }
+                
+                
                 match conenction_opt {
                     
                     Ok(connection_new) => {
@@ -449,15 +432,11 @@ impl MyHandler {
                         }
                         
                         event_loop.deregister(&stream).unwrap();
+                        
+                        self.log_mess(token, "close connection".to_owned());
                     }
                 };
                 
-                
-                match log_message {
-                    LogMessage::Message(mess) => self.log_mess(token, mess),
-                    LogMessage::Error(mess) => self.log_error(token, mess),
-                    LogMessage::None => {},
-                }
                 
                 
                 if let Some(pre_request) = request_opt {
