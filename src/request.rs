@@ -5,27 +5,25 @@ use std::io::{Error, ErrorKind};
 use mio::{Token, Sender};
 use server::MioMessage;
 
+use std::boxed::FnBox;
+
 /*
 http://hyper.rs/hyper/hyper/header/struct.Headers.html
                 ta biblioteka wykorzystuje nagłówki dostarczane przez hyper-a
 https://github.com/tailhook/rotor-http/blob/master/src/http1.rs
 */
 
-
-pub struct Request {
+pub struct PreRequest {
     method  : String,
     path    : String,
     version : u8,
     headers : HashMap<Box<String>, String>,
-    token   : Token,
-    sender  : Sender<MioMessage>,
 }
 
+impl PreRequest { 
 
-impl Request {    
-
-    pub fn new(req: httparse::Request, token: Token, sender: Sender<MioMessage>) -> Result<Request, Error> {
-
+    pub fn new(req: httparse::Request) -> Result<PreRequest, Error> {
+        
         match (req.method, req.path, req.version) {
 
             (Some(method), Some(path), Some(version)) => {
@@ -51,13 +49,11 @@ impl Request {
                     };
                 }
 
-                Ok(Request{
+                Ok(PreRequest{
                     method  : method.to_owned(),
                     path    : path.to_owned(),
                     version : version,
                     headers : headers,
-                    token   : token,
-                    sender  : sender,
                 })
             }
             _ => {
@@ -68,13 +64,16 @@ impl Request {
         }
     }
     
-    
-    pub fn get_post(self, callback: Box<Fn(Vec<u8>) + Send + Sync + 'static>) {
+    pub fn bind(self, token: Token, sender :  Sender<MioMessage>) -> Request {
         
-        self.sender.send(MioMessage::GetPost(self.token, callback)).unwrap();
+        Request {
+            pre_request : self,
+            token       : token,
+            sender      : sender,
+        }
     }
     
-    
+
     pub fn is_header_set(&self, name: &str, value: &str) -> bool {
         
         match self.headers.get(&Box::new(name.to_owned())) {
@@ -86,7 +85,7 @@ impl Request {
             None => false
         }
     }
-
+    
     pub fn path(&self) -> &String {
         &(self.path)
     }
@@ -117,7 +116,38 @@ impl Request {
             
             None => None
         }
+    }
+}
+
+
+pub struct Request {
+    pre_request : PreRequest,
+    token       : Token,
+    sender      : Sender<MioMessage>,
+}
+
+
+impl Request {    
+
+    pub fn get_post(self, callback: Box<FnBox(Vec<u8>) + Send + Sync + 'static>) {
         
+        self.sender.send(MioMessage::GetPost(self.token, callback)).unwrap();
+    }
+    
+    pub fn path(&self) -> &String {
+        self.pre_request.path()
+    }
+    
+    pub fn version(&self) -> u8 {
+        self.pre_request.version()
+    }
+    
+    pub fn method(&self) -> &String {
+        self.pre_request.method()
+    }
+    
+    pub fn is_post(&self) -> bool {
+        self.pre_request.is_post()
     }
 }
 

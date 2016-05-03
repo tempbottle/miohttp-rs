@@ -1,10 +1,12 @@
-use mio::{Token, Sender, EventSet, TryRead, TryWrite};
+use mio::{Token, EventSet, TryRead, TryWrite};
 use mio::tcp::{TcpStream};
 use httparse;
-use server::{Event, MioMessage};
-use request::Request;
+use server::Event;
+use request::PreRequest;
 use response;
 use std::cmp::min;
+
+use std::boxed::FnBox;
 
 enum ConnectionMode {
 
@@ -20,13 +22,14 @@ enum ConnectionPost {
     
     None,
     Data(Vec<u8>, usize),
-    Reading(Vec<u8>, usize, Box<Fn(Vec<u8>)>),
+    Reading(Vec<u8>, usize, Box<FnBox(Vec<u8>) + Send + Sync + 'static>),
     Complete,
 }
 
 pub enum TimerMode {
-    In,
-    Out,
+    In,                 //czytanie nagłówków requestu
+    Out,                //wysyłanie danych do przeglądarki
+    Post,               //czytanie parametrów post-a
     None,
 }
 
@@ -140,7 +143,7 @@ impl Connection {
                 match *connection_post {
                     ConnectionPost::None => TimerMode::None,
                     ConnectionPost::Data(_,_) => TimerMode::None,
-                    ConnectionPost::Reading(_,_,_) => TimerMode::In,
+                    ConnectionPost::Reading(_,_,_) => TimerMode::Post,
                     ConnectionPost::Complete => TimerMode::None,
                 }
                 
@@ -170,7 +173,29 @@ impl Connection {
         }
     }
     
-    pub fn ready(mut self, events: EventSet, token: &Token, sender: Sender<MioMessage>, server_down: bool) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+    
+    pub fn set_callback_post(self, callback: Box<FnBox(Vec<u8>) + Send + Sync + 'static>) -> (Result<Connection, TcpStream>, LogMessage) {
+        
+        match self.mode {
+            
+            ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::None) => {
+                
+                (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Complete))), LogMessage::None)
+            },
+            
+            ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Data(vector, len)) => {
+                
+                (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vector, len, callback)))), LogMessage::None)
+            },
+                        
+            _ => {
+                (Err(self.get_stream()), LogMessage::Error("Nieprawidłowy stan".to_owned()))
+            }
+        }
+    }
+    
+    
+    pub fn ready(mut self, events: EventSet, token: &Token, server_down: bool) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
         
         if events.is_error() {
             
@@ -191,7 +216,7 @@ impl Connection {
             
             ConnectionMode::ReadingRequest(buf, done) => {
 
-                transform_from_waiting_for_user(self.stream, events, buf, done, token, sender)
+                transform_from_waiting_for_user(self.stream, events, buf, done, token)
             },
             
             ConnectionMode::WaitingForServerResponse(keep_alive, connection_post) => {
@@ -244,16 +269,7 @@ impl Connection {
                     };
                     
                     
-                    let connection_post = if vec.len() == len {
-                        
-                        callback_post(vec);
-                        ConnectionPost::Complete
-                        
-                    } else {
-                        
-                        ConnectionPost::Reading(vec, len, callback_post)
-                    };
-                    
+                    let connection_post = ConnectionPost::Reading(vec, len, callback_post);
                     
                     let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post));
 
@@ -272,9 +288,32 @@ impl Connection {
             },
         }
     }
+    
+    
+    pub fn check_post(self) -> Connection {
+        
+        
+        if let ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post)) = self.mode {
+
+            let new_mode = if vec.len() == len {
+println!("wykonuję callbacka");
+                (callback_post as Box<FnBox(Vec<u8>)>)(vec);
+                ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Complete)
+
+            } else {
+
+                ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post))
+            };
+            
+            return Connection::make(self.stream, new_mode);
+        }
+        
+        self
+    }
+
 }
 
-fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize, token: &Token, sender: Sender<MioMessage>) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize, token: &Token) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
 
     if events.is_readable() {
 
@@ -295,15 +334,15 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                         
                         Ok(httparse::Status::Complete(size_parse)) => {
                             
-                            match Request::new(req, token.clone(), sender) {
+                            match PreRequest::new(req) {
 
-                                Ok(request) => {
+                                Ok(pre_request) => {
                                     
                                     
-                                    let keep_alive = request.is_header_set("Connection", "keep-alive");
+                                    let keep_alive = pre_request.is_header_set("Connection", "keep-alive");
                                     
                                     
-                                    let connection_post = if request.is_post() {
+                                    let connection_post = if pre_request.is_post() {
                                         
                                         if size > size_parse {
                                             
@@ -312,7 +351,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                                             post_data.extend_from_slice(&buf[size_parse..size]);
                                             
                                             
-                                            if let Some(req_len) = request.get_header("Content-Length".to_owned()) {
+                                            if let Some(req_len) = pre_request.get_header("Content-Length".to_owned()) {
                                                 
                                                 if req_len >= post_data.len() {
                                                     
@@ -344,7 +383,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
                                     
                                     
                                     
-                                    (Ok(Connection::make(stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post))), Some(request), LogMessage::None)
+                                    (Ok(Connection::make(stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post))), Some(pre_request), LogMessage::None)
                                 }
 
                                 Err(err) => {

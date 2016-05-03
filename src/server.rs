@@ -7,13 +7,14 @@ use std::mem;
 use response;
 use connection::{Connection, TimerMode, LogMessage};
 use token_gen::TokenGen;
-use request::Request;
+use request::{PreRequest, Request};
 use respchan::Respchan;
 use new_socket::new_socket;
 use miostart::MioStart;
 use miodown::MioDown;
 use std::time::Duration;
 
+use std::boxed::FnBox;
 
 pub type FnReceiver = Box<Fn((Request, Respchan)) + Send + Sync + 'static>;
 pub type FnLog      = Box<Fn(bool, String) + Send + Sync + 'static>;
@@ -46,7 +47,7 @@ pub enum Event {
 pub enum MioMessage {
     Response(Token, response::Response),
     Down,
-    GetPost(Token, Box<Fn(Vec<u8>) + Send + Sync + 'static>),
+    GetPost(Token, Box<FnBox(Vec<u8>) + Send + Sync + 'static>),
 }
 
 
@@ -131,8 +132,13 @@ impl Handler for MyHandler {
             
             MioMessage::GetPost(token, callback) => {
                 
-                //self.get_post(token, callback);
-                //weź połączenie, dodaj callbacka, i ju
+                
+                self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
+                    
+                    let (conn, log_mess) = connection_prev.set_callback_post(callback);
+                    
+                    (conn, None, log_mess)
+                });
             }
         };
     }
@@ -174,7 +180,7 @@ impl MyHandler {
     
     fn send_data_to_user(&mut self, event_loop: &mut EventLoop<MyHandler>, token: Token, response: response::Response) {
         
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
             
             let (new_conn, log_message) = connection_prev.send_data_to_user(token.clone(), response);
             
@@ -187,7 +193,7 @@ impl MyHandler {
         
         let token = token.clone();
         
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
             
             let log_mess = format!("miohttp {} -> timeout_trigger ok", token.as_usize());
             
@@ -252,13 +258,12 @@ impl MyHandler {
         
         let token       = token.clone();
         let server_down = self.server.is_none();
-        let channel     = event_loop.channel();
         
-        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+        self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
             
             //TODO - niepotrzebnie kanał jest klonowany przy każdym ready.
             
-            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, &token, channel, server_down);
+            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, &token, server_down);
 
             match connection_opt {
 
@@ -266,9 +271,9 @@ impl MyHandler {
 
                     match request_opt {
 
-                        Some(request) => {
+                        Some(pre_request) => {
                             
-                            (Ok(connection), Some(request), log_message)
+                            (Ok(connection), Some(pre_request), log_message)
                         }
 
                         None => {
@@ -328,9 +333,9 @@ impl MyHandler {
                 
                 match timer_mode {
                     
-                    TimerMode::In  => (Some(timeout), "keep".to_owned()),
-                    TimerMode::Out => (Some(timeout), "keep".to_owned()),
-                    
+                    TimerMode::In   => (Some(timeout), "keep".to_owned()),
+                    TimerMode::Out  => (Some(timeout), "keep".to_owned()),
+                    TimerMode::Post => (Some(timeout), "keep".to_owned()),
                     TimerMode::None => {
                         let _ = event_loop.clear_timeout(&timeout);
                         (None, "clear".to_owned())
@@ -345,11 +350,9 @@ impl MyHandler {
                     TimerMode::In => {
                         
                         match event_loop.timeout(token.clone(), Duration::from_millis(self.timeout_reading)) {
-                        
-                        //match event_loop.timeout_ms(token.clone(), self.timeout_reading) {
                             
-                            Ok(timeout) => (Some(timeout), "timer in set".to_owned()),
-                            Err(err)    => (None , format!("timer in error {:?}", err)),
+                            Ok(timeout) => (Some(timeout), "set IN".to_owned()),
+                            Err(err)    => (None , format!("error IN {:?}", err)),
                         }
                             
                     },
@@ -357,10 +360,19 @@ impl MyHandler {
                     TimerMode::Out => {
                         
                         match event_loop.timeout(token.clone(), Duration::from_millis(self.timeout_writing)) {
-                        //match event_loop.timeout_ms(token.clone(), self.timeout_writing) {
                             
-                            Ok(timeout) => (Some(timeout), "timer out set".to_owned()),
-                            Err(err)    => (None , format!("timer out error {:?}", err)),
+                            Ok(timeout) => (Some(timeout), "set OUT".to_owned()),
+                            Err(err)    => (None , format!("error OUT {:?}", err)),
+                        }
+                    },
+                    
+                    TimerMode::Post => {
+                                                                //TODO - ten parametr możnaby zrobić dedykowany
+                        
+                        match event_loop.timeout(token.clone(), Duration::from_millis(self.timeout_reading)) {
+                            
+                            Ok(timeout) => (Some(timeout), "set POST".to_owned()),
+                            Err(err)    => (None , format!("error POST {:?}", err)),
                         }
                     },
                     
@@ -398,7 +410,7 @@ impl MyHandler {
     }
     
     fn transform_connection<F>(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, process: F)
-        where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<Request>, LogMessage) {
+        where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
         
         let res = self.hash.remove(&token);
         
@@ -413,6 +425,9 @@ impl MyHandler {
                 match conenction_opt {
                     
                     Ok(connection_new) => {
+                        
+                                        //sprawdź czy dane z posta są kompletne
+                        let connection_new = connection_new.check_post();
                         
                         self.insert_connection(&token, connection_new, old_event, timeout, event_loop);
                     },
@@ -435,8 +450,9 @@ impl MyHandler {
                 }
                 
                 
-                if let Some(request) = request_opt {
-
+                if let Some(pre_request) = request_opt {
+                    
+                    let request  = pre_request.bind(token.clone(), event_loop.channel());
                     let respchan = Respchan::new(token.clone(), event_loop.channel());
 
                     (self.fn_receiver)((request, respchan));
@@ -445,11 +461,12 @@ impl MyHandler {
             
             None => {
                 
-                self.log_mess(format!("miohttp {} -> no socket by token", token.as_usize()));
+                let this_file    = file!();
+                let current_line = line!();
+                
+                self.log_error(format!("miohttp {} -> no socket by token in {}:{}", token.as_usize(), this_file, current_line));
             }
         };
     }
-
-
 }
 
