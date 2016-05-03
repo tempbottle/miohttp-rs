@@ -1,4 +1,4 @@
-use mio::{Token, EventSet, TryRead, TryWrite};
+use mio::{EventSet, TryRead, TryWrite};
 use mio::tcp::{TcpStream};
 use httparse;
 use server::Event;
@@ -22,7 +22,7 @@ enum ConnectionPost {
     
     None,
     Data(Vec<u8>, usize),
-    Reading(Vec<u8>, usize, Box<FnBox(Vec<u8>) + Send + Sync + 'static>),
+    Reading(Vec<u8>, usize, Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>),
     Complete,
 }
 
@@ -67,11 +67,8 @@ impl Connection {
         }
     }
     
-    pub fn get_stream(self) -> TcpStream {
-        self.stream
-    }
     
-    pub fn send_data_to_user(self, token: Token, response: response::Response) -> (Connection, LogMessage) {
+    pub fn send_data_to_user(self, response: response::Response) -> (Connection, LogMessage) {
         
         match self.mode {
 
@@ -103,15 +100,44 @@ impl Connection {
 
             _ => {
                 
-                let mess = format!("miohttp {} -> send_data_to_user: incorect state", token.as_usize());
-                
-                (self, LogMessage::Error(mess))
+                (self, LogMessage::Error("send_data_to_user: incorect state".to_owned()))
             }
         }
 
         
     }
 
+    
+    pub fn timeout_trigger(self) -> (Result<Connection, TcpStream>, LogMessage) {
+        
+        match self.mode {
+            
+            ConnectionMode::ReadingRequest(_,_) => {
+                
+                (Err(self.stream), LogMessage::Message("timeout trigger - reading request".to_owned()))
+            },
+            
+            ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(_, _, callback)) => {
+                
+                (callback as Box<FnBox(Option<Vec<u8>>)>)(None);
+                
+                let new_mode = ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Complete);
+
+                (Ok(Connection::make(self.stream, new_mode)), LogMessage::Message("timeout trigger - reading post data".to_owned()))
+            },
+            
+            ConnectionMode::WaitingForServerResponse(_,_) => {
+                unreachable!();
+            },
+            
+            ConnectionMode::SendingResponse(_,_,_) => {
+                
+                (Err(self.stream), LogMessage::Message("timeout trigger - sending request".to_owned()))
+            }
+        }
+    }
+    
+    
     pub fn get_event(&self) -> Event {
 
         match self.mode {
@@ -174,7 +200,7 @@ impl Connection {
     }
     
     
-    pub fn set_callback_post(self, callback: Box<FnBox(Vec<u8>) + Send + Sync + 'static>) -> (Result<Connection, TcpStream>, LogMessage) {
+    pub fn set_callback_post(self, callback: Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>) -> (Result<Connection, TcpStream>, LogMessage) {
         
         match self.mode {
             
@@ -189,26 +215,26 @@ impl Connection {
             },
                         
             _ => {
-                (Err(self.get_stream()), LogMessage::Error("Nieprawidłowy stan".to_owned()))
+                (Err(self.stream), LogMessage::Error("Nieprawidłowy stan".to_owned()))
             }
         }
     }
     
     
-    pub fn ready(mut self, events: EventSet, token: &Token, server_down: bool) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
+    pub fn ready(mut self, events: EventSet, server_down: bool) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
         
         if events.is_error() {
             
-            let log_message = format!("miohttp {} -> ready error, {:?}", token.as_usize(), events);
+            let log_message = format!("ready error, {:?}", events);
             
-            return (Err(self.get_stream()), None, LogMessage::Error(log_message));
+            return (Err(self.stream), None, LogMessage::Error(log_message));
         }
         
         if events.is_hup() {
             
-            let log_message = format!("miohttp {} -> ready, event hup, {:?}", token.as_usize(), events);
+            let log_message = format!("ready, event hup, {:?}", events);
             
-            return (Err(self.get_stream()), None, LogMessage::Error(log_message));
+            return (Err(self.stream), None, LogMessage::Error(log_message));
         }
         
         
@@ -216,7 +242,7 @@ impl Connection {
             
             ConnectionMode::ReadingRequest(buf, done) => {
 
-                transform_from_waiting_for_user(self.stream, events, buf, done, token)
+                transform_from_waiting_for_user(self.stream, events, buf, done)
             },
             
             ConnectionMode::WaitingForServerResponse(keep_alive, connection_post) => {
@@ -259,7 +285,7 @@ impl Connection {
 
                             Err(err) => {
 
-                                let message = format!("miohttp {} -> error write to socket, {:?}", token.as_usize(), err);
+                                let message = format!("error write to socket, {:?}", err);
 
                                 let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post)));
 
@@ -282,12 +308,13 @@ impl Connection {
             
             ConnectionMode::SendingResponse(keep_alive, str, done) => {
 
-                let (new_conn, log_mess) = transform_from_sending_to_user(self.stream, token, keep_alive, events, str, done, server_down);
+                let (new_conn, log_mess) = transform_from_sending_to_user(self.stream, keep_alive, events, str, done, server_down);
                 
                 (new_conn, None, log_mess)
             },
         }
     }
+    
     
     
     pub fn check_post(self) -> Connection {
@@ -296,8 +323,8 @@ impl Connection {
         if let ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post)) = self.mode {
 
             let new_mode = if vec.len() == len {
-println!("wykonuję callbacka");
-                (callback_post as Box<FnBox(Vec<u8>)>)(vec);
+                
+                (callback_post as Box<FnBox(Option<Vec<u8>>)>)(Some(vec));
                 ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Complete)
 
             } else {
@@ -313,7 +340,7 @@ println!("wykonuję callbacka");
 
 }
 
-fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize, token: &Token) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
+fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut buf: [u8; 2048], done: usize) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
 
     if events.is_readable() {
 
@@ -388,7 +415,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 
                                 Err(err) => {
                                     
-                                    let log_mess = format!("miohttp {} -> error prepare request, {:?}", token.as_usize(), err);
+                                    let log_mess = format!("error prepare request, {:?}", err);
                                     
                                     let response_400   = response::Response::create_400();
                                     let new_connection = ConnectionMode::SendingResponse(false, response_400.as_bytes(), 0);
@@ -452,7 +479,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 
             Err(err) => {
                 
-                let message = format!("miohttp {} -> error read from socket, {:?}", token.as_usize(), err);
+                let message = format!("error read from socket, {:?}", err);
                 
                 (Ok(Connection::make(stream, (ConnectionMode::ReadingRequest(buf, done)))), None, LogMessage::Error(message))
             }
@@ -465,7 +492,7 @@ fn transform_from_waiting_for_user(mut stream: TcpStream, events: EventSet, mut 
 }
 
 
-fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize, server_down: bool) -> (Result<Connection, TcpStream>, LogMessage) {
+fn transform_from_sending_to_user(mut stream: TcpStream, keep_alive: bool, events: EventSet, str: Vec<u8>, done: usize, server_down: bool) -> (Result<Connection, TcpStream>, LogMessage) {
 
     if events.is_writable() {
 
@@ -484,7 +511,7 @@ fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_ali
                         
                         if server_down == false && keep_alive == true {
 
-                            let mess = format!("miohttp {} -> keep alive", token.as_usize());
+                            let mess = format!("keep alive");
                             
                             let new_conn = Connection::make(stream, (ConnectionMode::ReadingRequest([0u8; 2048], 0)));
                             
@@ -524,7 +551,7 @@ fn transform_from_sending_to_user(mut stream: TcpStream, token: &Token, keep_ali
 
             Err(err) => {
 
-                let message = format!("miohttp {} -> error write to socket, {:?}", token.as_usize(), err);
+                let message = format!("error write to socket, {:?}", err);
                 
                 let new_conn = Connection::make(stream, ConnectionMode::SendingResponse(keep_alive, str, done));
                 

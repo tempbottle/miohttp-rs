@@ -47,7 +47,7 @@ pub enum Event {
 pub enum MioMessage {
     Response(Token, response::Response),
     Down,
-    GetPost(Token, Box<FnBox(Vec<u8>) + Send + Sync + 'static>),
+    GetPost(Token, Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>),
 }
 
 
@@ -182,7 +182,7 @@ impl MyHandler {
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
             
-            let (new_conn, log_message) = connection_prev.send_data_to_user(token.clone(), response);
+            let (new_conn, log_message) = connection_prev.send_data_to_user(response);
             
             (Ok(new_conn), None, log_message)
         });
@@ -195,9 +195,9 @@ impl MyHandler {
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
             
-            let log_mess = format!("miohttp {} -> timeout_trigger ok", token.as_usize());
+            let (conn, mess) = connection_prev.timeout_trigger();
             
-            (Err(connection_prev.get_stream()), None, LogMessage::Message(log_mess))
+            (conn, None, mess)
         });
     }
     
@@ -256,14 +256,13 @@ impl MyHandler {
     
     fn socket_ready(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, events: EventSet) {
         
-        let token       = token.clone();
         let server_down = self.server.is_none();
         
         self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
             
             //TODO - niepotrzebnie kanał jest klonowany przy każdym ready.
             
-            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, &token, server_down);
+            let (connection_opt, request_opt, log_message) = connection_prev.ready(events, server_down);
 
             match connection_opt {
 
@@ -405,16 +404,12 @@ impl MyHandler {
         self.log_mess(format!("miohttp {} -> set mode {}, {}, timer {}", token.as_usize(), connection.get_name(), mess_event, timer_message));
         
         self.hash.insert(token.clone(), (connection, new_event, new_timer));
-        
-        self.log_mess(format!("count hasmapy after insert {}", self.hash.len()));
     }
     
     fn transform_connection<F>(&mut self, event_loop: &mut EventLoop<MyHandler>, token: &Token, process: F)
         where F : FnOnce(Connection) -> (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage) {
         
         let res = self.hash.remove(&token);
-        
-        self.log_mess(format!("hashmap after decrement {}", self.hash.len()));
         
         match res {
             
@@ -444,8 +439,8 @@ impl MyHandler {
                 
                 
                 match log_message {
-                    LogMessage::Message(mess) => self.log_mess(mess),
-                    LogMessage::Error(mess) => self.log_error(mess),
+                    LogMessage::Message(mess) => self.log_mess(format!("miohttp {} -> {}", token.as_usize(), mess)),
+                    LogMessage::Error(mess) => self.log_error(format!("miohttp {} -> {}", token.as_usize(), mess)),
                     LogMessage::None => {},
                 }
                 

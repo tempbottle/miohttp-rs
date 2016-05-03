@@ -129,7 +129,7 @@ pub struct Request {
 
 impl Request {    
 
-    pub fn get_post(self, callback: Box<FnBox(Vec<u8>) + Send + Sync + 'static>) {
+    pub fn get_post(self, callback: Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>) {
         
         self.sender.send(MioMessage::GetPost(self.token, callback)).unwrap();
     }
