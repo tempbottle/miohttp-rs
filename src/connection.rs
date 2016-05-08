@@ -5,6 +5,7 @@ use server::Event;
 use request::PreRequest;
 use response;
 use std::cmp::min;
+use request::Request;
 
 use std::boxed::FnBox;
 
@@ -22,7 +23,7 @@ enum ConnectionPost {
     
     None,
     Data(Vec<u8>, usize),
-    Reading(Vec<u8>, usize, Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>),
+    Reading(Vec<u8>, usize, Request, Box<FnBox(Request, Option<Vec<u8>>) + Send + Sync + 'static>),
     Complete,
 }
 
@@ -78,7 +79,7 @@ impl Connection {
                     
                     ConnectionPost::None => false,
                     ConnectionPost::Data(_, _) => true,         //nieodebrane dane z posta, zamknij połączenie
-                    ConnectionPost::Reading(_,_,_) => {
+                    ConnectionPost::Reading(_,_,_,_) => {
                         unreachable!();
                     },
                     ConnectionPost::Complete => false,
@@ -117,9 +118,9 @@ impl Connection {
                 (Err(self.stream), LogMessage::Message("timeout trigger - reading request".to_owned()))
             },
             
-            ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(_, _, callback)) => {
+            ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(_, _, request, callback)) => {
                 
-                (callback as Box<FnBox(Option<Vec<u8>>)>)(None);
+                (callback as Box<FnBox(Request, Option<Vec<u8>>)>)(request, None);
                 
                 let new_mode = ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Complete);
 
@@ -149,7 +150,7 @@ impl Connection {
                 match *connection_post {
                     ConnectionPost::None => Event::None,
                     ConnectionPost::Data(_,_) => Event::None,
-                    ConnectionPost::Reading(_,_,_) => Event::Read,
+                    ConnectionPost::Reading(_,_,_,_) => Event::Read,
                     ConnectionPost::Complete => Event::None,
                 }
                 
@@ -169,7 +170,7 @@ impl Connection {
                 match *connection_post {
                     ConnectionPost::None => TimerMode::None,
                     ConnectionPost::Data(_,_) => TimerMode::None,
-                    ConnectionPost::Reading(_,_,_) => TimerMode::Post,
+                    ConnectionPost::Reading(_,_,_,_) => TimerMode::Post,
                     ConnectionPost::Complete => TimerMode::None,
                 }
                 
@@ -190,7 +191,7 @@ impl Connection {
                 match *connection_post {
                     ConnectionPost::None => "WaitingForServerResponse (post none)",
                     ConnectionPost::Data(_,_) => "WaitingForServerResponse (post data)",
-                    ConnectionPost::Reading(_,_,_) => "WaitingForServerResponse (post reading)",
+                    ConnectionPost::Reading(_,_,_,_) => "WaitingForServerResponse (post reading)",
                     ConnectionPost::Complete => "WaitingForServerResponse (post complete)",
                 }
             },
@@ -200,7 +201,7 @@ impl Connection {
     }
     
     
-    pub fn set_callback_post(self, callback: Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>) -> (Result<Connection, TcpStream>, LogMessage) {
+    pub fn set_callback_post(self, request: Request, callback: Box<FnBox(Request, Option<Vec<u8>>) + Send + Sync + 'static>) -> (Result<Connection, TcpStream>, LogMessage) {
         
         match self.mode {
             
@@ -211,7 +212,7 @@ impl Connection {
             
             ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Data(vector, len)) => {
                 
-                (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vector, len, callback)))), LogMessage::None)
+                (Ok(Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vector, len, request, callback)))), LogMessage::None)
             },
                         
             _ => {
@@ -247,7 +248,7 @@ impl Connection {
             
             ConnectionMode::WaitingForServerResponse(keep_alive, connection_post) => {
                 
-                if let ConnectionPost::Reading(mut vec, len, callback_post) = connection_post {
+                if let ConnectionPost::Reading(mut vec, len, request, callback_post) = connection_post {
                     
                     
                     let mut buf : [u8; 2048] = [0; 2048];
@@ -287,7 +288,7 @@ impl Connection {
 
                                 let message = format!("error write to socket, {:?}", err);
 
-                                let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post)));
+                                let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, request, callback_post)));
 
                                 return (Ok(new_conn), None, LogMessage::Error(message));
                             }
@@ -295,7 +296,7 @@ impl Connection {
                     };
                     
                     
-                    let connection_post = ConnectionPost::Reading(vec, len, callback_post);
+                    let connection_post = ConnectionPost::Reading(vec, len, request, callback_post);
                     
                     let new_conn = Connection::make(self.stream, ConnectionMode::WaitingForServerResponse(keep_alive, connection_post));
 
@@ -320,16 +321,16 @@ impl Connection {
     pub fn check_post(self) -> Connection {
         
         
-        if let ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post)) = self.mode {
+        if let ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, request, callback_post)) = self.mode {
 
             let new_mode = if vec.len() == len {
                 
-                (callback_post as Box<FnBox(Option<Vec<u8>>)>)(Some(vec));
+                (callback_post as Box<FnBox(Request, Option<Vec<u8>>)>)(request, Some(vec));
                 ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Complete)
 
             } else {
 
-                ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, callback_post))
+                ConnectionMode::WaitingForServerResponse(keep_alive, ConnectionPost::Reading(vec, len, request, callback_post))
             };
             
             return Connection::make(self.stream, new_mode);

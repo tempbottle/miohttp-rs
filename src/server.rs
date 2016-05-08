@@ -8,7 +8,6 @@ use response;
 use connection::{Connection, TimerMode, LogMessage};
 use token_gen::TokenGen;
 use request::{PreRequest, Request};
-use respchan::Respchan;
 use new_socket::new_socket;
 use miostart::MioStart;
 use miodown::MioDown;
@@ -16,7 +15,7 @@ use std::time::Duration;
 
 use std::boxed::FnBox;
 
-pub type FnReceiver   = Box<Fn((Request, Respchan)) + Send + Sync + 'static>;
+pub type FnReceiver   = Box<Fn(Request) + Send + Sync + 'static>;
 pub type FnLog        = Box<Fn(bool, String) + Send + Sync + 'static>;
 pub type TransformOut = (Result<Connection, TcpStream>, Option<PreRequest>, LogMessage);
 
@@ -48,7 +47,7 @@ pub enum Event {
 pub enum MioMessage {
     Response(Token, response::Response),
     Down,
-    GetPost(Token, Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>),
+    GetPost(Token, Request, Box<FnBox(Request, Option<Vec<u8>>) + Send + Sync + 'static>),
 }
 
 
@@ -142,11 +141,11 @@ impl Handler for MyHandler {
                 };
             },
             
-            MioMessage::GetPost(token, callback) => {
+            MioMessage::GetPost(token, request, callback) => {
                 
                 self.transform_connection(event_loop, &token, move|connection_prev : Connection| -> TransformOut {
                     
-                    let (conn, log_mess) = connection_prev.set_callback_post(callback);
+                    let (conn, log_mess) = connection_prev.set_callback_post(request, callback);
                     
                     (conn, None, log_mess)
                 });
@@ -420,9 +419,8 @@ impl MyHandler {
                 if let Some(pre_request) = request_opt {
                     
                     let request  = pre_request.bind(token.clone(), event_loop.channel());
-                    let respchan = Respchan::new(token.clone(), event_loop.channel());
 
-                    (self.fn_receiver)((request, respchan));
+                    (self.fn_receiver)(request);
                 }
             },
             

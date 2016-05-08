@@ -4,6 +4,7 @@ use httparse;
 use std::io::{Error, ErrorKind};
 use mio::{Token, Sender};
 use server::MioMessage;
+use response::Response;
 
 use std::boxed::FnBox;
 
@@ -67,6 +68,7 @@ impl PreRequest {
     pub fn bind(self, token: Token, sender :  Sender<MioMessage>) -> Request {
         
         Request {
+            is_send     : false,
             pre_request : self,
             token       : token,
             sender      : sender,
@@ -121,6 +123,7 @@ impl PreRequest {
 
 
 pub struct Request {
+    is_send     : bool,
     pre_request : PreRequest,
     token       : Token,
     sender      : Sender<MioMessage>,
@@ -129,9 +132,12 @@ pub struct Request {
 
 impl Request {    
 
-    pub fn get_post(self, callback: Box<FnBox(Option<Vec<u8>>) + Send + Sync + 'static>) {
+    pub fn get_post(self, callback: Box<FnBox(Request, Option<Vec<u8>>) + Send + Sync + 'static>) {
         
-        self.sender.send(MioMessage::GetPost(self.token, callback)).unwrap();
+        let token  = self.token.clone();
+        let sender = self.sender.clone();
+        
+        sender.send(MioMessage::GetPost(token, self, callback)).unwrap();
     }
     
     pub fn path(&self) -> &String {
@@ -149,6 +155,44 @@ impl Request {
     pub fn is_post(&self) -> bool {
         self.pre_request.is_post()
     }
+    
+    pub fn send(mut self, response: Response) {
+        
+        self.is_send = true;
+        
+        (self.sender).send(MioMessage::Response(self.token, response)).unwrap();
+    }
 }
 
 
+impl Drop for Request {
+    
+    fn drop(&mut self) {
+        
+        if self.is_send == false {
+            
+            let resp500 = Response::create_500();
+            (self.sender).send(MioMessage::Response(self.token, resp500)).unwrap();
+        }
+    }
+}
+
+
+                                                                   //task gwarantuje drop-a
+            /*
+            worker::render_request(api_file, request, Task::new(Box::new(move|result : Option<(Response)>|{
+
+                match result {
+
+                    Some(resp) => {
+
+                        respchan.send(resp);
+                    },
+
+                    None => {
+                                                                //coś poszło nie tak z obsługą tego requestu
+                        respchan.send(Response::create_500());
+                    }
+                };
+            })));
+            */
